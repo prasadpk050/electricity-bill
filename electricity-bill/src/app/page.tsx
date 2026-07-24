@@ -77,6 +77,9 @@ export default function BillDashboard() {
   const [history, setHistory] = useState<BillData[]>([]);
   const [selectedBillId, setSelectedBillId] = useState<string>('');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  
+  // Local state to hold edits until the "Save" button is clicked
+  const [localBill, setLocalBill] = useState<BillData | null>(null);
 
   // Custom Names
   const [son1Name, setSon1Name] = useState('SUDHIR');
@@ -147,32 +150,40 @@ export default function BillDashboard() {
     }, 1500);
   };
 
-  // Real-time Cloud Sync with Firestore (Sorted Newest Month First)
+  // Real-time Cloud Sync with Firestore
   useEffect(() => {
     setIsMounted(true);
     const q = query(collection(db, 'msedcl_bills'));
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      let bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
+      const bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
       
       if (bills.length === 0) {
         setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
       } else {
-        // Numeric sort by ID to guarantee newest month stays on top
-        bills.sort((a, b) => (parseInt(b.id) || 0) - (parseInt(a.id) || 0));
+        // Enforce strict numeric sorting so new months (Date.now()) always stay at the top
+        bills.sort((a, b) => Number(b.id) - Number(a.id));
         setHistory(bills);
-
-        if (!selectedBillId || !bills.find(b => b.id === selectedBillId)) {
+        
+        if (!selectedBillId) {
           setSelectedBillId(bills[0].id);
         }
       }
     });
 
     return () => unsubscribe();
-  }, [selectedBillId]);
+  }, []); // Only run once on mount
+
+  // Update local bill buffer whenever a new month is selected from the dropdown
+  useEffect(() => {
+    const found = history.find(b => b.id === selectedBillId) || history[0];
+    if (found) {
+      setLocalBill(JSON.parse(JSON.stringify(found)));
+    }
+  }, [selectedBillId, history]);
 
   // Loading Screen
-  if (!isMounted || history.length === 0) {
+  if (!isMounted || history.length === 0 || !localBill) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center font-sans">
         <div className="text-center space-y-3">
@@ -221,26 +232,34 @@ export default function BillDashboard() {
     );
   }
 
-  // Active Selected Bill
-  const activeBill = history.find(b => b.id === selectedBillId) || history[0];
-
-  // Helper to Save/Update Bill in Cloud
-  const updateCloudBill = async (updatedBill: BillData) => {
-    await setDoc(doc(db, 'msedcl_bills', updatedBill.id), updatedBill);
+  // Explicit Save Action to Cloud
+  const handleManualSave = async () => {
+    try {
+      await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
+      alert("माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे! (Saved to Firestore)");
+      setIsEditModalOpen(false);
+    } catch (error) {
+      alert("सेव्ह करताना अडचण आली. Error: " + error);
+    }
   };
 
-  // Explicit Save Action
-  const handleManualSave = async () => {
-    await updateCloudBill(activeBill);
-    alert("माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे! (Saved to Firestore)");
+  // Local state update (Stops database throttling)
+  const updateActiveField = (path: string[], value: number | string) => {
+    setLocalBill(prev => {
+      if (!prev) return prev;
+      const copy = JSON.parse(JSON.stringify(prev));
+      if (path.length === 1) copy[path[0]] = value;
+      if (path.length === 2) copy[path[0]][path[1]] = value;
+      return copy;
+    });
   };
 
   // Unit Calculations
-  const mainUnits = Math.max(0, activeBill.readings.mainCurr - activeBill.readings.mainPrev);
-  const motorUnits = Math.max(0, activeBill.readings.motorCurr - activeBill.readings.motorPrev);
-  const son1Units = Math.max(0, activeBill.readings.son1Curr - activeBill.readings.son1Prev);
-  const son2Units = Math.max(0, activeBill.readings.son2Curr - activeBill.readings.son2Prev);
-  const son3Units = Math.max(0, activeBill.readings.son3Curr - activeBill.readings.son3Prev);
+  const mainUnits = Math.max(0, localBill.readings.mainCurr - localBill.readings.mainPrev);
+  const motorUnits = Math.max(0, localBill.readings.motorCurr - localBill.readings.motorPrev);
+  const son1Units = Math.max(0, localBill.readings.son1Curr - localBill.readings.son1Prev);
+  const son2Units = Math.max(0, localBill.readings.son2Curr - localBill.readings.son2Prev);
+  const son3Units = Math.max(0, localBill.readings.son3Curr - localBill.readings.son3Prev);
 
   const parentsUnits = Math.max(0, mainUnits - (motorUnits + son1Units + son2Units + son3Units));
 
@@ -251,7 +270,7 @@ export default function BillDashboard() {
   const energyRate = mainUnits > 0 ? calculatedEnergyCharge / mainUnits : 0;
 
   // Fixed Charges Calculation
-  const totalBundledFixed = Object.values(activeBill.fixedPool).reduce((a, b) => a + b, 0);
+  const totalBundledFixed = Object.values(localBill.fixedPool).reduce((a, b) => a + b, 0);
   const fixedSharePerSon = totalBundledFixed / 3;
 
   // Shared Costs Calculations using Effective Energy Rate
@@ -278,23 +297,28 @@ export default function BillDashboard() {
     const monthName = prompt("Enter Month & Year (e.g. Aug-2026):", "Aug-2026");
     if (!monthName) return;
 
+    const newId = Date.now().toString();
     const newBill: BillData = {
-      id: Date.now().toString(),
+      id: newId,
       month: monthName,
-      totalBill: activeBill.totalBill,
-      energyCharge: activeBill.energyCharge,
-      fixedPool: { ...activeBill.fixedPool },
+      totalBill: localBill.totalBill,
+      energyCharge: localBill.energyCharge,
+      fixedPool: { ...localBill.fixedPool },
       readings: {
-        mainPrev: activeBill.readings.mainCurr, mainCurr: activeBill.readings.mainCurr,
-        motorPrev: activeBill.readings.motorCurr, motorCurr: activeBill.readings.motorCurr,
-        son1Prev: activeBill.readings.son1Curr, son1Curr: activeBill.readings.son1Curr,
-        son2Prev: activeBill.readings.son2Curr, son2Curr: activeBill.readings.son2Curr,
-        son3Prev: activeBill.readings.son3Curr, son3Curr: activeBill.readings.son3Curr,
+        mainPrev: localBill.readings.mainCurr, mainCurr: localBill.readings.mainCurr,
+        motorPrev: localBill.readings.motorCurr, motorCurr: localBill.readings.motorCurr,
+        son1Prev: localBill.readings.son1Curr, son1Curr: localBill.readings.son1Curr,
+        son2Prev: localBill.readings.son2Curr, son2Curr: localBill.readings.son2Curr,
+        son3Prev: localBill.readings.son3Curr, son3Curr: localBill.readings.son3Curr,
       }
     };
 
-    await updateCloudBill(newBill);
-    setSelectedBillId(newBill.id);
+    try {
+      await setDoc(doc(db, 'msedcl_bills', newId), newBill);
+      setSelectedBillId(newId);
+    } catch (error) {
+      alert("Error adding month: " + error);
+    }
   };
 
   const handleDeleteMonth = async (id: string) => {
@@ -307,13 +331,6 @@ export default function BillDashboard() {
       const remaining = history.filter(b => b.id !== id);
       setSelectedBillId(remaining[0].id);
     }
-  };
-
-  const updateActiveField = async (path: string[], value: number | string) => {
-    const copy = JSON.parse(JSON.stringify(activeBill));
-    if (path.length === 1) copy[path[0]] = value;
-    if (path.length === 2) copy[path[0]][path[1]] = value;
-    await updateCloudBill(copy);
   };
 
   // CSV Export & Import Handlers
@@ -363,7 +380,7 @@ export default function BillDashboard() {
               son3Prev: parseFloat(v[17]) || 0, son3Curr: parseFloat(v[18]) || 0,
             }
           };
-          await updateCloudBill(importedBill);
+          await setDoc(doc(db, 'msedcl_bills', importedBill.id), importedBill);
         }
         alert("CSV data synced to cloud successfully!");
       } catch (err) {
@@ -401,17 +418,17 @@ export default function BillDashboard() {
       }
       if (unitsMatch && unitsMatch[1]) {
         const extractedUnits = parseFloat(unitsMatch[1]);
-        updateActiveField(['readings', 'mainCurr'], activeBill.readings.mainPrev + extractedUnits);
+        updateActiveField(['readings', 'mainCurr'], localBill.readings.mainPrev + extractedUnits);
       }
 
-      alert("PDF parse completed! Values updated to Firestore.");
+      alert("PDF parse completed! Click 'Save' to apply changes.");
     } catch (err) {
       alert("Could not extract auto-data from PDF. You can enter values manually.");
     }
   };
 
   const shareWhatsApp = (name: string, amount: number, units: number) => {
-    const text = `*⚡ महावितरण वीज बिल तपशील (${activeBill.month}) - ${name}*\n\n` +
+    const text = `*⚡ महावितरण वीज बिल तपशील (${localBill.month}) - ${name}*\n\n` +
       `• स्थिर आकार भाग (Fixed Share): ₹${fixedSharePerSon.toFixed(2)}\n` +
       `• पाण्याच्या मोटार भाग (Water Share): ₹${waterSharePerSon.toFixed(2)}\n` +
       `• पालक वापर भाग (Parents Share): ₹${parentsSharePerSon.toFixed(2)}\n` +
@@ -489,7 +506,7 @@ export default function BillDashboard() {
                 <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit Entry)
               </button>
 
-              <button onClick={() => handleDeleteMonth(activeBill.id)} className="p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/40">
+              <button onClick={() => handleDeleteMonth(localBill.id)} className="p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/40">
                 <Trash2 className="w-4 h-4" />
               </button>
             </div>
@@ -513,7 +530,7 @@ export default function BillDashboard() {
               </div>
               <div className="bg-slate-950 print-card px-6 py-3 rounded-xl border border-slate-800 text-center">
                 <span className="text-xs text-slate-400 print-sub-text uppercase tracking-wider block font-semibold">बिलाचा महिना</span>
-                <span className="text-2xl font-black text-amber-400 print:text-indigo-700">{activeBill.month}</span>
+                <span className="text-2xl font-black text-amber-400 print:text-indigo-700">{localBill.month}</span>
               </div>
             </div>
           </div>
@@ -564,7 +581,7 @@ export default function BillDashboard() {
           <div className="grid grid-cols-4 gap-4">
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
               <p className="text-slate-400 print-sub-text text-xs font-bold">एकूण बिल (Total Bill)</p>
-              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{activeBill.totalBill}</p>
+              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{localBill.totalBill}</p>
             </div>
 
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
@@ -591,23 +608,23 @@ export default function BillDashboard() {
             <div className="grid grid-cols-5 gap-3 text-xs text-slate-300">
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
                 <p className="text-slate-400 print-sub-text font-semibold">स्थिर आकार</p>
-                <input type="number" value={activeBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+                <input type="number" value={localBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
                 <p className="text-slate-400 print-sub-text font-semibold">वहन आकार</p>
-                <input type="number" value={activeBill.fixedPool.wheelingCharge} onChange={(e) => updateActiveField(['fixedPool', 'wheelingCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+                <input type="number" value={localBill.fixedPool.wheelingCharge} onChange={(e) => updateActiveField(['fixedPool', 'wheelingCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
                 <p className="text-slate-400 print-sub-text font-semibold">इंधन आकार</p>
-                <input type="number" value={activeBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+                <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
                 <p className="text-slate-400 print-sub-text font-semibold">वीज शुल्क</p>
-                <input type="number" value={activeBill.fixedPool.duty} onChange={(e) => updateActiveField(['fixedPool', 'duty'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+                <input type="number" value={localBill.fixedPool.duty} onChange={(e) => updateActiveField(['fixedPool', 'duty'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
                 <p className="text-slate-400 print-sub-text font-semibold">समायोजन</p>
-                <input type="number" value={activeBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
             </div>
             <p className="text-xs text-slate-400 print-sub-text pt-1">
@@ -618,7 +635,7 @@ export default function BillDashboard() {
           {/* SECTION 2: Meter Readings */}
           <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
             <h3 className="text-sm font-extrabold text-amber-400 print-header-text flex items-center gap-2">
-              <Activity className="w-4 h-4 print-hide" /> मीटर रीडिंग नोंदवा ({activeBill.month})
+              <Activity className="w-4 h-4 print-hide" /> मीटर रीडिंग नोंदवा ({localBill.month})
             </h3>
             <div className="grid grid-cols-5 gap-3 text-xs">
 
@@ -626,11 +643,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-amber-400 print:text-amber-700 text-xs">मुख्य मीटर (Main)</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={activeBill.readings.mainPrev} onChange={(e) => updateActiveField(['readings', 'mainPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.mainPrev} onChange={(e) => updateActiveField(['readings', 'mainPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={activeBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -638,11 +655,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-blue-400 print:text-blue-700 text-xs">मोटार (Motor)</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={activeBill.readings.motorPrev} onChange={(e) => updateActiveField(['readings', 'motorPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.motorPrev} onChange={(e) => updateActiveField(['readings', 'motorPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={activeBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -650,11 +667,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-slate-200 print-header-text text-xs">{son1Name}</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={activeBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={activeBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -662,11 +679,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-slate-200 print-header-text text-xs">{son2Name}</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={activeBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={activeBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -674,11 +691,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-slate-200 print-header-text text-xs">{son3Name}</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={activeBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={activeBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -881,7 +898,7 @@ export default function BillDashboard() {
               {history.slice().reverse().map((b) => {
                 const u = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
                 const heightPct = Math.max(20, (u / maxHistoricalUnits) * 100);
-                const isSelected = b.id === activeBill.id;
+                const isSelected = b.id === localBill.id;
 
                 return (
                   <div key={b.id} className="flex-1 max-w-[80px] flex flex-col items-center gap-1.5 h-full justify-end">
@@ -995,17 +1012,17 @@ export default function BillDashboard() {
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-bold text-amber-400 flex items-center gap-2">
-              <Edit3 className="w-5 h-5" /> बिलात दुरुस्ती करा ({activeBill.month})
+              <Edit3 className="w-5 h-5" /> बिलात दुरुस्ती करा ({localBill.month})
             </h3>
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
                 <label className="text-slate-400 block mb-1">एकूण बिल (Total ₹)</label>
-                <input type="number" value={activeBill.totalBill} onChange={(e) => updateActiveField(['totalBill'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.totalBill} onChange={(e) => updateActiveField(['totalBill'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">ऊर्जा आकार (Energy Charge ₹)</label>
-                <input type="number" value={activeBill.energyCharge} onChange={(e) => updateActiveField(['energyCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.energyCharge} onChange={(e) => updateActiveField(['energyCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
             </div>
 
@@ -1013,23 +1030,23 @@ export default function BillDashboard() {
             <div className="grid grid-cols-5 gap-2 text-xs">
               <div>
                 <label className="text-slate-400 block mb-1 text-[10px]">स्थिर आकार</label>
-                <input type="number" value={activeBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
+                <input type="number" value={localBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1 text-[10px]">वहन आकार</label>
-                <input type="number" value={activeBill.fixedPool.wheelingCharge} onChange={(e) => updateActiveField(['fixedPool', 'wheelingCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
+                <input type="number" value={localBill.fixedPool.wheelingCharge} onChange={(e) => updateActiveField(['fixedPool', 'wheelingCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1 text-[10px]">इंधन आकार</label>
-                <input type="number" value={activeBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
+                <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1 text-[10px]">वीज शुल्क</label>
-                <input type="number" value={activeBill.fixedPool.duty} onChange={(e) => updateActiveField(['fixedPool', 'duty'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
+                <input type="number" value={localBill.fixedPool.duty} onChange={(e) => updateActiveField(['fixedPool', 'duty'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1 text-[10px]">समायोजन</label>
-                <input type="number" value={activeBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
+                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
             </div>
 
@@ -1037,28 +1054,28 @@ export default function BillDashboard() {
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
                 <label className="text-slate-400 block mb-1">मुख्य चालू (Main Curr)</label>
-                <input type="number" value={activeBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">मोटार चालू (Motor Curr)</label>
-                <input type="number" value={activeBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">{son1Name} चालू</label>
-                <input type="number" value={activeBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">{son2Name} चालू</label>
-                <input type="number" value={activeBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">{son3Name} चालू</label>
-                <input type="number" value={activeBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
               </div>
             </div>
 
             <div className="pt-4 flex justify-end">
-              <button onClick={() => setIsEditModalOpen(false)} className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5">
+              <button onClick={handleManualSave} className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5">
                 <Check className="w-4 h-4" /> सेव्ह आणि बंद करा
               </button>
             </div>
