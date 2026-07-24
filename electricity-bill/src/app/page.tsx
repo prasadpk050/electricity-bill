@@ -3,12 +3,12 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { 
-  collection, onSnapshot, doc, setDoc, deleteDoc, query, orderBy 
+  collection, onSnapshot, doc, setDoc, deleteDoc, query 
 } from 'firebase/firestore';
 import { 
   Zap, Droplet, User, Share2, BarChart2, Edit3, 
   ShieldAlert, FileText, Download, Upload, PlusCircle, 
-  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key
+  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save
 } from 'lucide-react';
 
 interface BillData {
@@ -147,18 +147,21 @@ export default function BillDashboard() {
     }, 1500);
   };
 
-  // Real-time Cloud Sync with Firestore
+  // Real-time Cloud Sync with Firestore (Sorted Newest Month First)
   useEffect(() => {
     setIsMounted(true);
-    const q = query(collection(db, 'msedcl_bills'), orderBy('id', 'desc'));
+    const q = query(collection(db, 'msedcl_bills'));
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
+      let bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
       
       if (bills.length === 0) {
         setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
       } else {
+        // Numeric sort by ID to guarantee newest month stays on top
+        bills.sort((a, b) => (parseInt(b.id) || 0) - (parseInt(a.id) || 0));
         setHistory(bills);
+
         if (!selectedBillId || !bills.find(b => b.id === selectedBillId)) {
           setSelectedBillId(bills[0].id);
         }
@@ -224,6 +227,12 @@ export default function BillDashboard() {
   // Helper to Save/Update Bill in Cloud
   const updateCloudBill = async (updatedBill: BillData) => {
     await setDoc(doc(db, 'msedcl_bills', updatedBill.id), updatedBill);
+  };
+
+  // Explicit Save Action
+  const handleManualSave = async () => {
+    await updateCloudBill(activeBill);
+    alert("माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे! (Saved to Firestore)");
   };
 
   // Unit Calculations
@@ -457,7 +466,7 @@ export default function BillDashboard() {
 
           {/* Top Controls */}
           <div className="print-hide flex flex-wrap items-center justify-between gap-3 bg-slate-900/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <select
                 value={selectedBillId}
                 onChange={(e) => setSelectedBillId(e.target.value)}
@@ -467,12 +476,19 @@ export default function BillDashboard() {
                   <option key={b.id} value={b.id}>{b.month}</option>
                 ))}
               </select>
+
+              <button onClick={handleManualSave} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm transition-all shadow-lg shadow-emerald-600/20">
+                <Save className="w-4 h-4" /> सेव्ह करा (Save)
+              </button>
+
               <button onClick={handleAddNewMonth} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
                 <PlusCircle className="w-4 h-4" /> महिना जोडा
               </button>
+
               <button onClick={() => setIsEditModalOpen(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg shadow-blue-600/20">
                 <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit Entry)
               </button>
+
               <button onClick={() => handleDeleteMonth(activeBill.id)} className="p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/40">
                 <Trash2 className="w-4 h-4" />
               </button>
