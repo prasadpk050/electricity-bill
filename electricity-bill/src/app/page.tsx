@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { db } from '@/lib/firebase';
 import { 
   collection, onSnapshot, doc, setDoc, deleteDoc, query 
@@ -89,6 +89,14 @@ export default function BillDashboard() {
   // Local state to hold edits until the "Save" button is clicked
   const [localBill, setLocalBill] = useState<BillData | null>(null);
 
+  // Non-blocking toast (replaces alert() so the UI never "feels stuck")
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   // Custom Names
   const [son1Name, setSon1Name] = useState('SUDHIR');
   const [son2Name, setSon2Name] = useState('PRAVIN');
@@ -163,12 +171,16 @@ export default function BillDashboard() {
     setIsMounted(true);
     const q = query(collection(db, 'msedcl_bills'));
     
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
-      
-      if (bills.length === 0) {
-        setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
-      } else {
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
+
+        if (bills.length === 0) {
+          setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
+          return;
+        }
+
         // Sort strictly by numeric IDs (timestamps) so newest months remain on top
         bills.sort((a, b) => {
           const idA = Number(a.id) || 0;
@@ -177,7 +189,7 @@ export default function BillDashboard() {
         });
 
         setHistory(bills);
-        
+
         // Preserve active month selection across updates
         setSelectedBillId(prev => {
           if (prev && bills.some(b => b.id === prev)) {
@@ -185,19 +197,44 @@ export default function BillDashboard() {
           }
           return bills[0].id;
         });
+      },
+      (error) => {
+        // Surface connection/permission failures instead of silently
+        // falling back to defaults. If you see this in the console,
+        // check your Firebase security rules and that the
+        // NEXT_PUBLIC_FIREBASE_* env vars are set in Vercel's
+        // Production environment (not just Preview/Development).
+        console.error('Firestore onSnapshot error:', error);
+        setToast('क्लाउड कनेक्शन अडचण: ' + error.message);
       }
-    });
+    );
 
     return () => unsubscribe();
   }, []);
 
-  // Update local bill buffer whenever a new month is selected from the dropdown
+  // ---- FIX: only reload localBill from `history` when the SELECTED
+  // MONTH actually changes, not every time Firestore sends a snapshot
+  // (which happens constantly, including echoes of your own saves).
+  // Previously this effect re-ran on every `history` update and wiped
+  // out whatever you were actively editing/viewing, replacing it with
+  // stale saved data — that's what caused "Sept shows Aug/July data".
+  const lastLoadedIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     const found = history.find(b => b.id === selectedBillId) || history[0];
-    if (found) {
+    if (!found) return;
+
+    const monthChanged = lastLoadedIdRef.current !== selectedBillId;
+    const notLoadedYet = !localBill;
+
+    if (monthChanged || notLoadedYet) {
       setLocalBill(JSON.parse(JSON.stringify(found)));
+      lastLoadedIdRef.current = selectedBillId;
     }
-  }, [selectedBillId, history]);
+    // else: history updated in the background (e.g. our own save
+    // echoing back) but the user hasn't switched months — leave
+    // localBill (and any unsaved edits) alone.
+  }, [selectedBillId, history, localBill]);
 
   // Loading Screen
   if (!isMounted || history.length === 0 || !localBill) {
@@ -249,15 +286,18 @@ export default function BillDashboard() {
     );
   }
 
-  // Explicit Save Action to Cloud
+  // Explicit Save Action to Cloud — closes the modal immediately and
+  // shows a non-blocking toast instead of a blocking alert(), so it
+  // never feels "stuck" waiting for you to dismiss a popup.
   const handleManualSave = async () => {
     if (!localBill) return;
+    setIsEditModalOpen(false);
     try {
       await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
-      alert("माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे! (Saved to Firestore)");
-      setIsEditModalOpen(false);
-    } catch (error) {
-      alert("सेव्ह करताना अडचण आली. Error: " + error);
+      lastLoadedIdRef.current = localBill.id; // treat as already-loaded, avoid self-clobber
+      setToast('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
+    } catch (error: any) {
+      setToast('सेव्ह करताना अडचण आली: ' + error.message);
     }
   };
 
@@ -323,14 +363,24 @@ export default function BillDashboard() {
   const handleConfirmAddMonth = async () => {
     if (!localBill) return;
 
+    const monthName = `${selectedMonth}-${selectedYear}`;
+
+    // Guard against creating a duplicate month entry
+    if (history.some(b => b.month === monthName)) {
+      setToast(`${monthName} आधीच अस्तित्वात आहे.`);
+      setIsAddMonthModalOpen(false);
+      return;
+    }
+
     // 1. First save current active month edits to cloud so current readings carry over accurately
     try {
       await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
+      lastLoadedIdRef.current = localBill.id;
     } catch (err) {
       console.error("Auto-save error before adding month:", err);
+      setToast('चालू महिना सेव्ह करताना अडचण आली, तरीही पुढे जात आहे.');
     }
 
-    const monthName = `${selectedMonth}-${selectedYear}`;
     const newId = Date.now().toString();
 
     const newBill: BillData = {
@@ -350,22 +400,27 @@ export default function BillDashboard() {
 
     try {
       await setDoc(doc(db, 'msedcl_bills', newId), newBill);
-      setSelectedBillId(newId);
       setIsAddMonthModalOpen(false);
-      alert(`${monthName} जोडला गेला आहे! मागील रीडींग्स कॅरी फॉरवर्ड झाल्या आहेत.`);
-    } catch (error) {
-      alert("महिना जोडताना अडचण आली: " + error);
+      // Switch to the new month explicitly and load it directly —
+      // don't wait on the next onSnapshot round-trip.
+      lastLoadedIdRef.current = newId;
+      setLocalBill(JSON.parse(JSON.stringify(newBill)));
+      setSelectedBillId(newId);
+      setToast(`${monthName} जोडला गेला आहे! मागील रीडींग्स कॅरी फॉरवर्ड झाल्या आहेत.`);
+    } catch (error: any) {
+      setToast('महिना जोडताना अडचण आली: ' + error.message);
     }
   };
 
   const handleDeleteMonth = async (id: string) => {
     if (history.length <= 1) {
-      alert("At least one bill record must remain.");
+      setToast('किमान एक बिल नोंद शिल्लक असणे आवश्यक आहे.');
       return;
     }
     if (confirm("Are you sure you want to delete this bill entry?")) {
       await deleteDoc(doc(db, 'msedcl_bills', id));
       const remaining = history.filter(b => b.id !== id);
+      lastLoadedIdRef.current = remaining[0].id;
       setSelectedBillId(remaining[0].id);
     }
   };
@@ -419,9 +474,9 @@ export default function BillDashboard() {
           };
           await setDoc(doc(db, 'msedcl_bills', importedBill.id), importedBill);
         }
-        alert("CSV data synced to cloud successfully!");
+        setToast('CSV data synced to cloud successfully!');
       } catch (err) {
-        alert("Failed to parse CSV file. Please check format.");
+        setToast('Failed to parse CSV file. Please check format.');
       }
     };
     reader.readAsText(file);
@@ -458,9 +513,9 @@ export default function BillDashboard() {
         updateActiveField(['readings', 'mainCurr'], localBill.readings.mainPrev + extractedUnits);
       }
 
-      alert("PDF parse completed! Click 'Save' to apply changes.");
+      setToast('PDF parse completed! Click "Save" to apply changes.');
     } catch (err) {
-      alert("Could not extract auto-data from PDF. You can enter values manually.");
+      setToast('Could not extract auto-data from PDF. You can enter values manually.');
     }
   };
 
@@ -514,6 +569,17 @@ export default function BillDashboard() {
           }
         }
       `}</style>
+
+      {/* Non-blocking toast notification (replaces alert()) */}
+      {toast && (
+        <div className="print-hide fixed top-4 left-1/2 -translate-x-1/2 z-[60] bg-slate-900 border border-amber-500/40 text-slate-100 text-sm font-semibold px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 max-w-[90vw]">
+          <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toast}</span>
+          <button onClick={() => setToast(null)} className="ml-2 text-slate-400 hover:text-white">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans selection:bg-amber-500 selection:text-slate-950">
         <div className="max-w-6xl mx-auto space-y-6">
@@ -615,7 +681,7 @@ export default function BillDashboard() {
           </div>
 
           {/* Quick Summary Cards */}
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-4 gap-4" key={`summary-${localBill.id}`}>
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
               <p className="text-slate-400 print-sub-text text-xs font-bold">एकूण बिल (Total Bill)</p>
               <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{localBill.totalBill}</p>
@@ -670,7 +736,7 @@ export default function BillDashboard() {
           </div>
 
           {/* SECTION 2: Meter Readings */}
-          <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
+          <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3" key={`readings-${localBill.id}`}>
             <h3 className="text-sm font-extrabold text-amber-400 print-header-text flex items-center gap-2">
               <Activity className="w-4 h-4 print-hide" /> मीटर रीडिंग नोंदवा ({localBill.month})
             </h3>
@@ -1021,6 +1087,7 @@ export default function BillDashboard() {
 
               <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400">
                 नवा महिना: <span className="text-amber-400 font-bold">{selectedMonth}-{selectedYear}</span>
+                {" — करंट रीडिंग ("}{localBill.month}{") पासून कॅरी फॉरवर्ड होईल"}
               </div>
             </div>
 
@@ -1030,7 +1097,7 @@ export default function BillDashboard() {
                 onClick={() => setIsAddMonthModalOpen(false)} 
                 className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
               >
-                रद्द करा
+                रद्द करा (Cancel)
               </button>
               <button 
                 type="button" 
