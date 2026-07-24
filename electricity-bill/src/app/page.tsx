@@ -161,18 +161,27 @@ export default function BillDashboard() {
       if (bills.length === 0) {
         setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
       } else {
-        // Enforce strict numeric sorting so new months (Date.now()) always stay at the top
-        bills.sort((a, b) => Number(b.id) - Number(a.id));
+        // Robust sort: newest numeric IDs first
+        bills.sort((a, b) => {
+          const idA = Number(a.id) || 0;
+          const idB = Number(b.id) || 0;
+          return idB - idA;
+        });
+
         setHistory(bills);
         
-        if (!selectedBillId) {
-          setSelectedBillId(bills[0].id);
-        }
+        // Preserve current month selection across real-time updates
+        setSelectedBillId(prev => {
+          if (prev && bills.some(b => b.id === prev)) {
+            return prev;
+          }
+          return bills[0].id;
+        });
       }
     });
 
     return () => unsubscribe();
-  }, []); // Only run once on mount
+  }, []);
 
   // Update local bill buffer whenever a new month is selected from the dropdown
   useEffect(() => {
