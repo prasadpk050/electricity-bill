@@ -41,6 +41,37 @@ const initialDefaultBill: BillData = {
   readings: { mainPrev: 10519, mainCurr: 10659, motorPrev: 500, motorCurr: 520, son1Prev: 1200, son1Curr: 1240, son2Prev: 1500, son2Curr: 1540, son3Prev: 0, son3Curr: 0 }
 };
 
+// MSEDCL Slab-Based Energy Charge Helper Function
+const calculateTotalEnergyCharge = (totalUnits: number): number => {
+  if (totalUnits <= 0) return 0;
+
+  let totalCharge = 0;
+
+  // Slab 1: 0 - 100 units @ ₹3.96/unit
+  const slab1 = Math.min(totalUnits, 100);
+  totalCharge += slab1 * 3.96;
+
+  // Slab 2: 101 - 300 units @ ₹10.80/unit
+  if (totalUnits > 100) {
+    const slab2 = Math.min(totalUnits - 100, 200);
+    totalCharge += slab2 * 10.80;
+  }
+
+  // Slab 3: 301 - 500 units @ ₹15.03/unit
+  if (totalUnits > 300) {
+    const slab3 = Math.min(totalUnits - 300, 200);
+    totalCharge += slab3 * 15.03;
+  }
+
+  // Slab 4: > 500 units @ ₹17.53/unit
+  if (totalUnits > 500) {
+    const slab4 = totalUnits - 500;
+    totalCharge += slab4 * 17.53;
+  }
+
+  return totalCharge;
+};
+
 export default function BillDashboard() {
   const [isMounted, setIsMounted] = useState(false);
   const [history, setHistory] = useState<BillData[]>([]);
@@ -92,10 +123,7 @@ export default function BillDashboard() {
     await setDoc(doc(db, 'msedcl_bills', updatedBill.id), updatedBill);
   };
 
-  // Calculations
-  const totalBundledFixed = Object.values(activeBill.fixedPool).reduce((a, b) => a + b, 0);
-  const fixedSharePerSon = totalBundledFixed / 3;
-
+  // Unit Calculations
   const mainUnits = Math.max(0, activeBill.readings.mainCurr - activeBill.readings.mainPrev);
   const motorUnits = Math.max(0, activeBill.readings.motorCurr - activeBill.readings.motorPrev);
   const son1Units = Math.max(0, activeBill.readings.son1Curr - activeBill.readings.son1Prev);
@@ -103,8 +131,18 @@ export default function BillDashboard() {
   const son3Units = Math.max(0, activeBill.readings.son3Curr - activeBill.readings.son3Prev);
 
   const parentsUnits = Math.max(0, mainUnits - (motorUnits + son1Units + son2Units + son3Units));
-  const energyRate = mainUnits > 0 ? activeBill.energyCharge / mainUnits : 0;
 
+  // 1. Calculate Total Energy Charge dynamically from total main units (MSEDCL Slabs)
+  const calculatedEnergyCharge = calculateTotalEnergyCharge(mainUnits);
+
+  // 2. Derive Effective Rate per Unit
+  const energyRate = mainUnits > 0 ? calculatedEnergyCharge / mainUnits : 0;
+
+  // Fixed Charges Calculation
+  const totalBundledFixed = Object.values(activeBill.fixedPool).reduce((a, b) => a + b, 0);
+  const fixedSharePerSon = totalBundledFixed / 3;
+
+  // Shared Costs Calculations using Effective Energy Rate
   const totalWaterCost = motorUnits * energyRate;
   const waterSharePerSon = totalWaterCost / 3;
 
@@ -405,8 +443,8 @@ export default function BillDashboard() {
             </div>
 
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">ऊर्जा आकार (Energy Charge)</p>
-              <p className="text-2xl font-black text-blue-400 print:text-blue-700 mt-1">₹{activeBill.energyCharge}</p>
+              <p className="text-slate-400 print-sub-text text-xs font-bold">ऊर्जा आकार (Calculated Energy Charge)</p>
+              <p className="text-2xl font-black text-blue-400 print:text-blue-700 mt-1">₹{calculatedEnergyCharge.toFixed(2)}</p>
             </div>
 
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
@@ -415,7 +453,7 @@ export default function BillDashboard() {
             </div>
 
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">प्रभावी दर (Rate/Unit)</p>
+              <p className="text-slate-400 print-sub-text text-xs font-bold">प्रभावी दर (Avg Rate/Unit)</p>
               <p className="text-2xl font-black text-amber-400 print:text-amber-700 mt-1">₹{energyRate.toFixed(2)}</p>
             </div>
           </div>
