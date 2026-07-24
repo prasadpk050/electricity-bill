@@ -44,10 +44,24 @@ const initialDefaultBill: BillData = {
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
 const availableYears = ["2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030"];
 
-// Helper to parse month strings like "Jul-2026" or "Aug-2020" into chronological timestamps
+// Normalizes keys like "Aug-25" or "Aug-2025" to standard "Aug-2025"
+const normalizeMonthKey = (key: string): string => {
+  if (!key) return key;
+  const parts = key.trim().split('-');
+  if (parts.length !== 2) return key;
+  
+  let [m, y] = parts;
+  if (y.length === 2) {
+    y = `20${y}`; // convert 25 -> 2025
+  }
+  return `${m}-${y}`;
+};
+
+// Parses month keys into numeric timestamps for accurate multi-year sorting
 const parseMonthKey = (key: string): number => {
   if (!key) return 0;
-  const [monthStr, yearStr] = key.split('-');
+  const normalized = normalizeMonthKey(key);
+  const [monthStr, yearStr] = normalized.split('-');
   const months: Record<string, number> = {
     Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
     Jul: 6, Aug: 7, Sept: 8, Sep: 8, Oct: 9, Nov: 10, Dec: 11
@@ -124,7 +138,6 @@ export default function BillDashboard() {
   const [passChangeError, setPassChangeError] = useState('');
   const [passChangeSuccess, setPassChangeSuccess] = useState(false);
 
-  // Check saved password and authentication status on load
   useEffect(() => {
     const savedPassword = localStorage.getItem('bill_app_password');
     if (savedPassword) {
@@ -183,21 +196,32 @@ export default function BillDashboard() {
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
+        const rawBills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
 
-        if (bills.length === 0) {
+        if (rawBills.length === 0) {
           console.log("No collection found, seeding default bill...");
           setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
           return;
         }
 
-        setHistory(bills);
+        // Normalize month IDs to prevent duplicate short/long year entries
+        const normalizedBills = rawBills.map(b => {
+          const normKey = normalizeMonthKey(b.id || b.month);
+          return {
+            ...b,
+            id: normKey,
+            month: normKey
+          };
+        });
+
+        setHistory(normalizedBills);
 
         setSelectedBillId(prev => {
-          if (prev && bills.some(b => b.id === prev)) {
-            return prev;
+          const normPrev = normalizeMonthKey(prev);
+          if (normPrev && normalizedBills.some(b => b.id === normPrev)) {
+            return normPrev;
           }
-          return bills[0].id;
+          return normalizedBills[0].id;
         });
       },
       (error) => {
@@ -223,25 +247,10 @@ export default function BillDashboard() {
 
   // Chronologically Sorted Bills List
   const sortedBills = [...history].sort((a, b) => {
-    const timeA = parseMonthKey(a.id || a.month);
-    const timeB = parseMonthKey(b.id || b.month);
+    const timeA = parseMonthKey(a.id);
+    const timeB = parseMonthKey(b.id);
     return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
   });
-
-  // Explicit Save Action to Cloud with debug alert
-  const handleManualSave = async () => {
-    if (!localBill) return;
-    setIsEditModalOpen(false);
-    try {
-      console.log("Saving document to Firestore:", localBill);
-      await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill, { merge: true });
-      lastLoadedIdRef.current = localBill.id;
-      alert('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
-    } catch (error: any) {
-      console.error("Manual save error:", error);
-      alert('सेव्ह करताना अडचण आली: ' + error.message);
-    }
-  };
 
   // Open "Add Month" Modal & auto-suggest next logical month
   const handleOpenAddMonthModal = () => {
@@ -262,7 +271,7 @@ export default function BillDashboard() {
     setIsAddMonthModalOpen(true);
   };
 
-  const targetMonthName = `${selectedMonth}-${selectedYear}`;
+  const targetMonthName = normalizeMonthKey(`${selectedMonth}-${selectedYear}`);
   const isMonthDuplicate = history.some(b => b.month === targetMonthName);
 
   // Loading Screen
@@ -344,14 +353,18 @@ export default function BillDashboard() {
 
   const parentsUnits = Math.max(0, mainUnits - (motorUnits + son1Units + son2Units + son3Units));
 
-  // 1. Calculate Total Energy Charge dynamically from total main units (MSEDCL Slabs)
+  // 1. Calculate Total Energy Charge dynamically from total main units
   const calculatedEnergyCharge = calculateTotalEnergyCharge(mainUnits);
+
+  // Fixed Charges Calculation
+  const totalBundledFixed = Object.values(localBill.fixedPool).reduce((a, b) => a + b, 0);
+
+  // DYNAMIC TOTAL BILL (Calculated Energy Charge + Fixed Pool Sum)
+  const actualTotalBill = calculatedEnergyCharge + totalBundledFixed;
 
   // 2. Derive Effective Rate per Unit
   const energyRate = mainUnits > 0 ? calculatedEnergyCharge / mainUnits : 0;
 
-  // Fixed Charges Calculation
-  const totalBundledFixed = Object.values(localBill.fixedPool).reduce((a, b) => a + b, 0);
   const fixedSharePerSon = totalBundledFixed / 3;
 
   // Shared Costs Calculations using Effective Energy Rate
@@ -372,6 +385,30 @@ export default function BillDashboard() {
   const maxCost = Math.max(son1Total, son2Total, son3Total, 1);
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
+
+  // Explicit Save Action to Cloud
+  const handleManualSave = async () => {
+    if (!localBill) return;
+    setIsEditModalOpen(false);
+
+    // Save with calculated total bill and normalized ID
+    const billToSave: BillData = {
+      ...localBill,
+      id: normalizeMonthKey(localBill.id),
+      month: normalizeMonthKey(localBill.month),
+      totalBill: Math.round(actualTotalBill),
+      energyCharge: Math.round(calculatedEnergyCharge)
+    };
+
+    try {
+      await setDoc(doc(db, 'msedcl_bills', billToSave.id), billToSave, { merge: true });
+      lastLoadedIdRef.current = billToSave.id;
+      alert('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
+    } catch (error: any) {
+      console.error("Manual save error:", error);
+      alert('सेव्ह करताना अडचण आली: ' + error.message);
+    }
+  };
 
   // Add New Month Entry
   const handleConfirmAddMonth = async () => {
@@ -453,9 +490,13 @@ export default function BillDashboard() {
         for (const line of lines) {
           const v = line.split(',');
           if (!v[0]) continue;
+          
+          const rawId = v[0] || v[1];
+          const normKey = normalizeMonthKey(rawId);
+
           const importedBill: BillData = {
-            id: v[0] || v[1],
-            month: v[1],
+            id: normKey,
+            month: normKey,
             totalBill: parseFloat(v[2]) || 0,
             energyCharge: parseFloat(v[3]) || 0,
             fixedPool: {
@@ -473,9 +514,9 @@ export default function BillDashboard() {
               son3Prev: parseFloat(v[17]) || 0, son3Curr: parseFloat(v[18]) || 0,
             }
           };
-          await setDoc(doc(db, 'msedcl_bills', importedBill.id), importedBill);
+          await setDoc(doc(db, 'msedcl_bills', normKey), importedBill, { merge: true });
         }
-        alert('CSV data synced to cloud successfully!');
+        alert('CSV data synced & normalized to cloud successfully!');
       } catch (err) {
         alert('Failed to parse CSV file. Please check format.');
       }
@@ -579,7 +620,7 @@ export default function BillDashboard() {
             <div className="flex flex-wrap items-center gap-2">
               <select
                 value={selectedBillId}
-                onChange={(e) => setSelectedBillId(e.target.value)}
+                onChange={(e) => setSelectedBillId(normalizeMonthKey(e.target.value))}
                 className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-amber-400 font-bold focus:outline-none cursor-pointer"
               >
                 {sortedBills.map(b => (
@@ -587,10 +628,8 @@ export default function BillDashboard() {
                 ))}
               </select>
 
-              {/* Chronological Sort Toggle Button */}
               <button
                 onClick={() => setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
-                title="Toggle Chronological Sorting Order"
                 className="flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-3 py-2 rounded-xl text-xs transition-colors"
               >
                 <ArrowUpDown className="w-3.5 h-3.5 text-amber-400" />
@@ -684,7 +723,7 @@ export default function BillDashboard() {
           <div className="grid grid-cols-4 gap-4" key={`summary-${localBill.id}`}>
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
               <p className="text-slate-400 print-sub-text text-xs font-bold">एकूण बिल (Total Bill)</p>
-              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{localBill.totalBill}</p>
+              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{Math.round(actualTotalBill)}</p>
             </div>
 
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
@@ -1211,12 +1250,22 @@ export default function BillDashboard() {
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
-                <label className="text-slate-400 block mb-1">एकूण बिल (Total ₹)</label>
-                <input type="number" value={localBill.totalBill} onChange={(e) => updateActiveField(['totalBill'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <label className="text-slate-400 block mb-1">एकूण बिल (Total ₹ - Autosum Enabled)</label>
+                <input 
+                  type="number" 
+                  disabled
+                  value={Math.round(actualTotalBill)} 
+                  className="w-full bg-slate-950/50 border border-slate-800/80 rounded-xl px-3 py-2 text-amber-400 font-extrabold outline-none cursor-not-allowed" 
+                />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">ऊर्जा आकार (Energy Charge ₹)</label>
-                <input type="number" value={localBill.energyCharge} onChange={(e) => updateActiveField(['energyCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none" />
+                <input 
+                  type="number" 
+                  disabled
+                  value={calculatedEnergyCharge.toFixed(2)} 
+                  className="w-full bg-slate-950/50 border border-slate-800/80 rounded-xl px-3 py-2 text-blue-400 font-extrabold outline-none cursor-not-allowed" 
+                />
               </div>
             </div>
 
