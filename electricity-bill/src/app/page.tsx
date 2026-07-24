@@ -63,18 +63,25 @@ const initialDefaultBill: BillData = {
   readings: { mainPrev: 10659, mainCurr: 10799, motorPrev: 0, motorCurr: 20, son1Prev: 0, son1Curr: 40, son2Prev: 0, son2Curr: 40, son3Prev: 0, son3Curr: 0 }
 };
 
-const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const availableYears = ["2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030"];
 
-// Normalizes keys like "Aug-25" or "Aug-2025" to standard "Aug-2025"
-const normalizeMonthKey = (key: string): string => {
-  if (!key) return key;
-  const parts = key.trim().split('-');
-  if (parts.length !== 2) return key;
+// Strict Month Key Normalizer: Cleans spaces, unifies 'Sept' -> 'Sep', and formats short/long years
+const sanitizeMonthKey = (rawKey: string): string => {
+  if (!rawKey) return 'Jul-2026';
+  let cleaned = rawKey.trim().replace(/\s+/g, '');
+  cleaned = cleaned.replace(/^Sept-/i, 'Sep-'); // Standardize Sept -> Sep
+  
+  const parts = cleaned.split('-');
+  if (parts.length !== 2) return cleaned;
   
   let [m, y] = parts;
+  // Capitalize first letter of month (e.g., sep -> Sep)
+  m = m.charAt(0).toUpperCase() + m.slice(1).toLowerCase();
+  if (m === 'Sept') m = 'Sep';
+
   if (y.length === 2) {
-    y = `20${y}`;
+    y = `20${y}`; // convert 25 -> 2025
   }
   return `${m}-${y}`;
 };
@@ -82,11 +89,11 @@ const normalizeMonthKey = (key: string): string => {
 // Parses month keys into numeric timestamps for accurate multi-year sorting
 const parseMonthKey = (key: string): number => {
   if (!key) return 0;
-  const normalized = normalizeMonthKey(key);
+  const normalized = sanitizeMonthKey(key);
   const [monthStr, yearStr] = normalized.split('-');
   const months: Record<string, number> = {
     Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
-    Jul: 6, Aug: 7, Sept: 8, Sep: 8, Oct: 9, Nov: 10, Dec: 11
+    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11
   };
   
   const monthIndex = months[monthStr] ?? 0;
@@ -217,7 +224,7 @@ export default function BillDashboard() {
     }, 1500);
   };
 
-  // Real-time Cloud Sync with Firestore
+  // Real-time Cloud Sync with Firestore & Deduplication
   useEffect(() => {
     setIsMounted(true);
     const q = query(collection(db, 'msedcl_bills'));
@@ -233,24 +240,31 @@ export default function BillDashboard() {
           return;
         }
 
-        const normalizedBills = rawBills.map(b => {
-          const normKey = normalizeMonthKey(b.id || b.month);
-          return {
+        // Map and deduplicate by sanitized month key
+        const uniqueBillsMap = new Map<string, BillData>();
+
+        rawBills.forEach(b => {
+          const normKey = sanitizeMonthKey(b.id || b.month);
+          const cleanBill: BillData = {
             ...b,
             id: normKey,
             month: normKey,
             tariffConfig: b.tariffConfig || defaultTariffConfig
           };
+          // Overwrite duplicate keys so only 1 entry exists per month in memory
+          uniqueBillsMap.set(normKey, cleanBill);
         });
 
-        setHistory(normalizedBills);
+        const deduplicatedBills = Array.from(uniqueBillsMap.values());
+
+        setHistory(deduplicatedBills);
 
         setSelectedBillId(prev => {
-          const normPrev = normalizeMonthKey(prev);
-          if (normPrev && normalizedBills.some(b => b.id === normPrev)) {
+          const normPrev = sanitizeMonthKey(prev);
+          if (normPrev && deduplicatedBills.some(b => b.id === normPrev)) {
             return normPrev;
           }
-          return normalizedBills[0].id;
+          return deduplicatedBills[0].id;
         });
       },
       (error) => {
@@ -274,7 +288,7 @@ export default function BillDashboard() {
     }
   }, [selectedBillId, history, localBill]);
 
-  // Chronologically Sorted Bills List
+  // Chronologically Sorted Unique Bills List
   const sortedBills = [...history].sort((a, b) => {
     const timeA = parseMonthKey(a.id);
     const timeB = parseMonthKey(b.id);
@@ -299,7 +313,7 @@ export default function BillDashboard() {
     setIsAddMonthModalOpen(true);
   };
 
-  const targetMonthName = normalizeMonthKey(`${selectedMonth}-${selectedYear}`);
+  const targetMonthName = sanitizeMonthKey(`${selectedMonth}-${selectedYear}`);
   const isMonthDuplicate = history.some(b => b.month === targetMonthName);
 
   // Loading Screen
@@ -437,16 +451,18 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Save to Cloud
+  // Save to Cloud with Strict Key Sanitization
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
     setIsTariffModalOpen(false);
 
+    const cleanKey = sanitizeMonthKey(localBill.month || localBill.id);
+
     const billToSave: BillData = {
       ...localBill,
-      id: normalizeMonthKey(localBill.id),
-      month: normalizeMonthKey(localBill.month),
+      id: cleanKey,
+      month: cleanKey,
       totalBill: actualTotalBill,
       energyCharge: parseFloat(calculatedEnergyCharge.toFixed(2)),
       fixedPool: {
@@ -457,8 +473,10 @@ export default function BillDashboard() {
     };
 
     try {
-      await setDoc(doc(db, 'msedcl_bills', billToSave.id), billToSave, { merge: true });
-      lastLoadedIdRef.current = billToSave.id;
+      // OVERWRITE existing document using clean key
+      await setDoc(doc(db, 'msedcl_bills', cleanKey), billToSave);
+      lastLoadedIdRef.current = cleanKey;
+      setSelectedBillId(cleanKey);
       alert('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
     } catch (error: any) {
       console.error("Manual save error:", error);
@@ -513,14 +531,15 @@ export default function BillDashboard() {
       return;
     }
     if (confirm("Are you sure you want to delete this bill entry?")) {
-      await deleteDoc(doc(db, 'msedcl_bills', id));
-      const remaining = history.filter(b => b.id !== id);
+      const cleanKey = sanitizeMonthKey(id);
+      await deleteDoc(doc(db, 'msedcl_bills', cleanKey));
+      const remaining = history.filter(b => b.id !== cleanKey);
       lastLoadedIdRef.current = remaining[0].id;
       setSelectedBillId(remaining[0].id);
     }
   };
 
-  // Export CSV Handler with FULL TARIFF RATES included
+  // Export CSV Handler
   const handleExportCSV = () => {
     let csv = "ID,Month,TotalBill,EnergyCharge,Slab1Rate,Slab2Rate,Slab3Rate,Slab4Rate,Slab5Rate,WheelingRate,DutyPercent,FixedCharge,WheelingCharge,FAC,Duty,NetArrears,MainPrev,MainCurr,MotorPrev,MotorCurr,Son1Prev,Son1Curr,Son2Prev,Son2Curr,Son3Prev,Son3Curr\n";
     
@@ -544,7 +563,7 @@ export default function BillDashboard() {
     a.click();
   };
 
-  // Import CSV Handler with FULL TARIFF PARSING
+  // Import CSV Handler with strict sanitization
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -559,9 +578,8 @@ export default function BillDashboard() {
           if (!v[0]) continue;
           
           const rawId = v[0] || v[1];
-          const normKey = normalizeMonthKey(rawId);
+          const normKey = sanitizeMonthKey(rawId);
 
-          // Check if CSV has 26 columns (includes tariff config) or old format (19 columns)
           const hasTariff = v.length >= 26;
 
           const importedTariff: TariffConfig = hasTariff ? {
@@ -574,7 +592,7 @@ export default function BillDashboard() {
             dutyPercent: parseFloat(v[10]) || 16.0,
           } : defaultTariffConfig;
 
-          const offset = hasTariff ? 7 : 0; // Offset column positions for old vs new CSVs
+          const offset = hasTariff ? 7 : 0;
 
           const mainPrev = parseFloat(v[9 + offset]) || 0;
           const mainCurr = parseFloat(v[10 + offset]) || 0;
@@ -610,7 +628,7 @@ export default function BillDashboard() {
           };
           await setDoc(doc(db, 'msedcl_bills', normKey), importedBill, { merge: true });
         }
-        alert('CSV data with custom rates imported successfully!');
+        alert('CSV data imported and deduplicated successfully!');
       } catch (err) {
         alert('Failed to parse CSV file. Please check format.');
       }
@@ -714,7 +732,7 @@ export default function BillDashboard() {
             <div className="flex flex-wrap items-center gap-2">
               <select
                 value={selectedBillId}
-                onChange={(e) => setSelectedBillId(normalizeMonthKey(e.target.value))}
+                onChange={(e) => setSelectedBillId(sanitizeMonthKey(e.target.value))}
                 className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-amber-400 font-bold focus:outline-none cursor-pointer"
               >
                 {sortedBills.map(b => (
@@ -738,7 +756,6 @@ export default function BillDashboard() {
                 <PlusCircle className="w-4 h-4" /> महिना जोडा
               </button>
 
-              {/* SINGLE CLEAN SETTINGS BUTTON */}
               <button onClick={() => setIsTariffModalOpen(true)} className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-purple-300 font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg">
                 <Settings className="w-4 h-4 text-purple-400" /> दर व नियम (Settings)
               </button>
@@ -841,7 +858,7 @@ export default function BillDashboard() {
             </div>
           </div>
 
-          {/* SECTION 1: Fixed Charges Breakup - CLEAN DEFAULT DESIGN */}
+          {/* SECTION 1: Fixed Charges Breakup */}
           <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
             <h3 className="text-sm font-extrabold text-amber-400 print-header-text flex items-center gap-2">
               <ShieldAlert className="text-purple-400 w-4 h-4 print-hide" /> स्थिर आकारांचा तपशील (Fixed Charges Breakup)
@@ -1129,7 +1146,7 @@ export default function BillDashboard() {
 
           </div>
 
-          {/* Vertical Trend Bar Graph (Strictly Chronological) */}
+          {/* Vertical Trend Bar Graph */}
           <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
             <h3 className="text-sm font-bold text-slate-100 print-header-text flex items-center gap-2">
               <TrendingUp className="text-purple-400 w-4 h-4 print-hide" /> ३. मासिक वापर ट्रेंड (Month-over-Month Trend)
