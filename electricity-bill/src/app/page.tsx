@@ -8,7 +8,7 @@ import {
 import { 
   Zap, Droplet, User, Share2, BarChart2, Edit3, 
   ShieldAlert, FileText, Download, Upload, PlusCircle, 
-  Trash2, Printer, TrendingUp, PieChart, Activity, Check 
+  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key
 } from 'lucide-react';
 
 interface BillData {
@@ -87,12 +87,22 @@ export default function BillDashboard() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [inputPassword, setInputPassword] = useState('');
   const [passwordError, setPasswordError] = useState(false);
+  const [appPassword, setAppPassword] = useState('1234');
 
-  // Set your preferred password here:
-  const APP_PASSWORD = "1234";
+  // Change Password Modal State
+  const [isChangePassModalOpen, setIsChangePassModalOpen] = useState(false);
+  const [newPass, setNewPass] = useState('');
+  const [confirmPass, setConfirmPass] = useState('');
+  const [passChangeError, setPassChangeError] = useState('');
+  const [passChangeSuccess, setPassChangeSuccess] = useState(false);
 
-  // Check saved authentication status on load
+  // Check saved password and authentication status on load
   useEffect(() => {
+    const savedPassword = localStorage.getItem('bill_app_password');
+    if (savedPassword) {
+      setAppPassword(savedPassword);
+    }
+
     const savedAuth = localStorage.getItem('bill_app_authenticated');
     if (savedAuth === 'true') {
       setIsAuthenticated(true);
@@ -101,13 +111,40 @@ export default function BillDashboard() {
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    if (inputPassword === APP_PASSWORD) {
+    if (inputPassword === appPassword) {
       setIsAuthenticated(true);
       localStorage.setItem('bill_app_authenticated', 'true');
       setPasswordError(false);
     } else {
       setPasswordError(true);
     }
+  };
+
+  const handleChangePassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPassChangeError('');
+    setPassChangeSuccess(false);
+
+    if (!newPass || newPass.trim().length === 0) {
+      setPassChangeError('कृपया नवीन पासवर्ड टाका.');
+      return;
+    }
+
+    if (newPass !== confirmPass) {
+      setPassChangeError('पासवर्ड जुळत नाही (Passwords do not match).');
+      return;
+    }
+
+    localStorage.setItem('bill_app_password', newPass);
+    setAppPassword(newPass);
+    setPassChangeSuccess(true);
+    setNewPass('');
+    setConfirmPass('');
+
+    setTimeout(() => {
+      setIsChangePassModalOpen(false);
+      setPassChangeSuccess(false);
+    }, 1500);
   };
 
   // Real-time Cloud Sync with Firestore
@@ -446,8 +483,6 @@ export default function BillDashboard() {
             </button>
           </div>
 
-          {/* ================= PAGE 1 ================= */}
-
           {/* Header */}
           <div className="relative overflow-hidden bg-slate-900 print-card p-6 rounded-2xl border border-slate-800">
             <div className="flex flex-row justify-between items-center gap-4">
@@ -467,12 +502,20 @@ export default function BillDashboard() {
             </div>
           </div>
 
-          {/* Name Customization & Data Tools */}
+          {/* Name Customization, Password Change & Data Tools */}
           <div className="print-hide grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-2">
-              <p className="text-xs text-slate-400 flex items-center gap-2 font-semibold">
-                <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Customize Display Names):
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-slate-400 flex items-center gap-2 font-semibold">
+                  <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Customize Display Names):
+                </p>
+                <button 
+                  onClick={() => setIsChangePassModalOpen(true)} 
+                  className="flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 px-2.5 py-1 rounded-lg text-xs text-amber-400 font-semibold transition-colors"
+                >
+                  <Key className="w-3.5 h-3.5" /> पासवर्ड बदला
+                </button>
+              </div>
               <div className="grid grid-cols-3 gap-2">
                 <input type="text" value={son1Name} onChange={(e) => setSon1Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
                 <input type="text" value={son2Name} onChange={(e) => setSon2Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
@@ -861,6 +904,75 @@ export default function BillDashboard() {
 
         </div>
       </main>
+
+      {/* CHANGE PASSWORD MODAL */}
+      {isChangePassModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <form onSubmit={handleChangePassword} className="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-base font-bold text-amber-400 flex items-center gap-2">
+                <Key className="w-5 h-5" /> पासवर्ड बदला
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setIsChangePassModalOpen(false)}
+                className="text-slate-400 hover:text-white text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="text-slate-300 block mb-1">नवीन पासवर्ड (New Password)</label>
+                <input 
+                  type="password" 
+                  value={newPass}
+                  onChange={(e) => setNewPass(e.target.value)}
+                  placeholder="नवीन पासवर्ड लिहा"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1">पासवर्ड पुन्हा टाका (Confirm Password)</label>
+                <input 
+                  type="password" 
+                  value={confirmPass}
+                  onChange={(e) => setConfirmPass(e.target.value)}
+                  placeholder="पुन्हा तोच पासवर्ड टाका"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500"
+                />
+              </div>
+
+              {passChangeError && (
+                <p className="text-rose-400 text-center font-semibold text-[11px]">{passChangeError}</p>
+              )}
+
+              {passChangeSuccess && (
+                <p className="text-emerald-400 text-center font-semibold text-[11px]">पासवर्ड यशस्वीरित्या बदलला! (Success)</p>
+              )}
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2">
+              <button 
+                type="button" 
+                onClick={() => setIsChangePassModalOpen(false)} 
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
+              >
+                रद्द करा
+              </button>
+              <button 
+                type="submit" 
+                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1"
+              >
+                <Check className="w-3.5 h-3.5" /> सेव्ह करा
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* EDIT/CORRECTION MODAL */}
       {isEditModalOpen && (
