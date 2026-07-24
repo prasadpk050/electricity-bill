@@ -33,7 +33,7 @@ interface BillData {
 }
 
 const initialDefaultBill: BillData = {
-  id: '1',
+  id: 'Jul-2026',
   month: "Jul-2026",
   totalBill: 1400,
   energyCharge: 828,
@@ -169,20 +169,14 @@ export default function BillDashboard() {
         const bills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
 
         if (bills.length === 0) {
+          console.log("No collection found, seeding default bill...");
           setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
           return;
         }
 
-        // Sort strictly by numeric IDs (newest timestamp first)
-        bills.sort((a, b) => {
-          const idA = Number(a.id) || 0;
-          const idB = Number(b.id) || 0;
-          return idB - idA;
-        });
-
+        // Sort by month/time reverse order
         setHistory(bills);
 
-        // Preserve active month selection across updates
         setSelectedBillId(prev => {
           if (prev && bills.some(b => b.id === prev)) {
             return prev;
@@ -210,6 +204,21 @@ export default function BillDashboard() {
       lastLoadedIdRef.current = selectedBillId;
     }
   }, [selectedBillId, history, localBill]);
+
+  // Explicit Save Action to Cloud with debug alert
+  const handleManualSave = async () => {
+    if (!localBill) return;
+    setIsEditModalOpen(false);
+    try {
+      console.log("Saving document to Firestore:", localBill);
+      await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill, { merge: true });
+      lastLoadedIdRef.current = localBill.id;
+      alert('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
+    } catch (error: any) {
+      console.error("Manual save error:", error);
+      alert('सेव्ह करताना अडचण आली: ' + error.message);
+    }
+  };
 
   // Open "Add Month" Modal & auto-suggest next logical month
   const handleOpenAddMonthModal = () => {
@@ -283,19 +292,6 @@ export default function BillDashboard() {
     );
   }
 
-  // Explicit Save Action to Cloud
-  const handleManualSave = async () => {
-    if (!localBill) return;
-    setIsEditModalOpen(false);
-    try {
-      await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
-      lastLoadedIdRef.current = localBill.id;
-      alert('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
-    } catch (error: any) {
-      alert('सेव्ह करताना अडचण आली: ' + error.message);
-    }
-  };
-
   // Cancel edits and revert local bill state
   const handleCancelEdit = () => {
     const original = history.find(b => b.id === localBill.id);
@@ -363,9 +359,8 @@ export default function BillDashboard() {
       return;
     }
 
-    // Source values are carried over directly from currently displayed active month
     const sourceBill = localBill;
-    const newId = Date.now().toString();
+    const newId = targetMonthName; // Use month string as Document ID for consistency
 
     const newBill: BillData = {
       id: newId,
@@ -436,7 +431,7 @@ export default function BillDashboard() {
           const v = line.split(',');
           if (!v[0]) continue;
           const importedBill: BillData = {
-            id: v[0] || Date.now().toString(),
+            id: v[0] || v[1],
             month: v[1],
             totalBill: parseFloat(v[2]) || 0,
             energyCharge: parseFloat(v[3]) || 0,
@@ -872,8 +867,7 @@ export default function BillDashboard() {
             </div>
           </div>
 
-          {/* ================= PAGE 2 ================= */}
-
+          {/* PAGE 2 / Charts */}
           <div className="print-page-break grid grid-cols-2 gap-4">
 
             {/* Chart 1: Financial Split */}
