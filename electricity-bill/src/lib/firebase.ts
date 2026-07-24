@@ -10,9 +10,10 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
+// Initialize Firebase App
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-// Initialize Firestore with long-polling so browser extensions don't block network requests
+// Force long polling to fix silent request hanging on Vercel/Brave/AdBlockers
 export const db = initializeFirestore(app, {
   experimentalAutoDetectLongPolling: true,
 });

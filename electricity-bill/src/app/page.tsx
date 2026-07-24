@@ -8,7 +8,7 @@ import {
 import { 
   Zap, Droplet, User, Share2, BarChart2, Edit3, 
   ShieldAlert, FileText, Download, Upload, PlusCircle, 
-  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X, AlertTriangle
+  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X, AlertTriangle, ArrowUpDown
 } from 'lucide-react';
 
 interface BillData {
@@ -42,7 +42,21 @@ const initialDefaultBill: BillData = {
 };
 
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
-const availableYears = ["2025", "2026", "2027", "2028", "2029", "2030"];
+const availableYears = ["2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030"];
+
+// Helper to parse month strings like "Jul-2026" or "Aug-2020" into chronological timestamps
+const parseMonthKey = (key: string): number => {
+  if (!key) return 0;
+  const [monthStr, yearStr] = key.split('-');
+  const months: Record<string, number> = {
+    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+    Jul: 6, Aug: 7, Sept: 8, Sep: 8, Oct: 9, Nov: 10, Dec: 11
+  };
+  
+  const monthIndex = months[monthStr] ?? 0;
+  const year = parseInt(yearStr, 10) || 2026;
+  return new Date(year, monthIndex, 1).getTime();
+};
 
 // MSEDCL Slab-Based Energy Charge Helper Function
 const calculateTotalEnergyCharge = (totalUnits: number): number => {
@@ -81,6 +95,9 @@ export default function BillDashboard() {
   const [selectedBillId, setSelectedBillId] = useState<string>('');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isAddMonthModalOpen, setIsAddMonthModalOpen] = useState(false);
+
+  // Sorting State: 'desc' = Newest to Oldest | 'asc' = Oldest to Newest
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
 
   // Month addition dropdown selection
   const [selectedMonth, setSelectedMonth] = useState('Aug');
@@ -174,7 +191,6 @@ export default function BillDashboard() {
           return;
         }
 
-        // Sort by month/time reverse order
         setHistory(bills);
 
         setSelectedBillId(prev => {
@@ -205,6 +221,13 @@ export default function BillDashboard() {
     }
   }, [selectedBillId, history, localBill]);
 
+  // Chronologically Sorted Bills List
+  const sortedBills = [...history].sort((a, b) => {
+    const timeA = parseMonthKey(a.id || a.month);
+    const timeB = parseMonthKey(b.id || b.month);
+    return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
+  });
+
   // Explicit Save Action to Cloud with debug alert
   const handleManualSave = async () => {
     if (!localBill) return;
@@ -222,7 +245,7 @@ export default function BillDashboard() {
 
   // Open "Add Month" Modal & auto-suggest next logical month
   const handleOpenAddMonthModal = () => {
-    const latestBill = history[0] || localBill;
+    const latestBill = sortedBills[0] || localBill;
     if (latestBill && latestBill.month) {
       const parts = latestBill.month.split('-');
       if (parts.length === 2) {
@@ -360,7 +383,7 @@ export default function BillDashboard() {
     }
 
     const sourceBill = localBill;
-    const newId = targetMonthName; // Use month string as Document ID for consistency
+    const newId = targetMonthName;
 
     const newBill: BillData = {
       id: newId,
@@ -406,7 +429,7 @@ export default function BillDashboard() {
   // CSV Export & Import Handlers
   const handleExportCSV = () => {
     let csv = "ID,Month,TotalBill,EnergyCharge,FixedCharge,WheelingCharge,FAC,Duty,Adjustments,MainPrev,MainCurr,MotorPrev,MotorCurr,Son1Prev,Son1Curr,Son2Prev,Son2Curr,Son3Prev,Son3Curr\n";
-    history.forEach(b => {
+    sortedBills.forEach(b => {
       csv += `${b.id},${b.month},${b.totalBill},${b.energyCharge},${b.fixedPool.fixedCharge},${b.fixedPool.wheelingCharge},${b.fixedPool.fac},${b.fixedPool.duty},${b.fixedPool.adjustments},${b.readings.mainPrev},${b.readings.mainCurr},${b.readings.motorPrev},${b.readings.motorCurr},${b.readings.son1Prev},${b.readings.son1Curr},${b.readings.son2Prev},${b.readings.son2Curr},${b.readings.son3Prev},${b.readings.son3Curr}\n`;
     });
 
@@ -557,12 +580,22 @@ export default function BillDashboard() {
               <select
                 value={selectedBillId}
                 onChange={(e) => setSelectedBillId(e.target.value)}
-                className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-amber-400 font-bold focus:outline-none"
+                className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-amber-400 font-bold focus:outline-none cursor-pointer"
               >
-                {history.map(b => (
+                {sortedBills.map(b => (
                   <option key={b.id} value={b.id}>{b.month}</option>
                 ))}
               </select>
+
+              {/* Chronological Sort Toggle Button */}
+              <button
+                onClick={() => setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
+                title="Toggle Chronological Sorting Order"
+                className="flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-3 py-2 rounded-xl text-xs transition-colors"
+              >
+                <ArrowUpDown className="w-3.5 h-3.5 text-amber-400" />
+                <span>{sortOrder === 'desc' ? 'नवीन ते जुने (New → Old)' : 'जुने ते नवीन (Old → New)'}</span>
+              </button>
 
               <button onClick={handleManualSave} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm transition-all shadow-lg shadow-emerald-600/20">
                 <Save className="w-4 h-4" /> सेव्ह करा (Save)
@@ -958,19 +991,19 @@ export default function BillDashboard() {
 
           </div>
 
-          {/* Vertical Trend Bar Graph */}
+          {/* Vertical Trend Bar Graph (Strictly Chronological) */}
           <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
             <h3 className="text-sm font-bold text-slate-100 print-header-text flex items-center gap-2">
               <TrendingUp className="text-purple-400 w-4 h-4 print-hide" /> ३. मासिक वापर ट्रेंड (Month-over-Month Trend)
             </h3>
-            <div className="flex items-end justify-around gap-4 h-44 pt-6 pb-2 border-b border-slate-800 print:border-slate-300">
-              {history.slice().reverse().map((b) => {
+            <div className="flex items-end justify-around gap-4 h-44 pt-6 pb-2 border-b border-slate-800 print:border-slate-300 overflow-x-auto">
+              {[...sortedBills].reverse().map((b) => {
                 const u = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
                 const heightPct = Math.max(20, (u / maxHistoricalUnits) * 100);
                 const isSelected = b.id === localBill.id;
 
                 return (
-                  <div key={b.id} className="flex-1 max-w-[80px] flex flex-col items-center gap-1.5 h-full justify-end">
+                  <div key={b.id} className="flex-1 min-w-[50px] max-w-[80px] flex flex-col items-center gap-1.5 h-full justify-end">
                     <span className="text-xs font-black text-purple-300 print:text-purple-700">{u}U</span>
                     <div className="w-full bg-slate-950 print:bg-slate-200 rounded-t-lg h-full flex items-end p-1 border border-slate-800 print:border-slate-300">
                       <div 
