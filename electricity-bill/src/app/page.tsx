@@ -8,7 +8,7 @@ import {
 import { 
   Zap, Droplet, User, Share2, BarChart2, Edit3, 
   ShieldAlert, FileText, Download, Upload, PlusCircle, 
-  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save
+  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X
 } from 'lucide-react';
 
 interface BillData {
@@ -40,6 +40,9 @@ const initialDefaultBill: BillData = {
   fixedPool: { fixedCharge: 130, wheelingCharge: 224, fac: 34, duty: 194.56, adjustments: 10.56 },
   readings: { mainPrev: 10519, mainCurr: 10659, motorPrev: 500, motorCurr: 520, son1Prev: 1200, son1Curr: 1240, son2Prev: 1500, son2Curr: 1540, son3Prev: 0, son3Curr: 0 }
 };
+
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
+const availableYears = ["2025", "2026", "2027", "2028", "2029", "2030"];
 
 // MSEDCL Slab-Based Energy Charge Helper Function
 const calculateTotalEnergyCharge = (totalUnits: number): number => {
@@ -77,6 +80,11 @@ export default function BillDashboard() {
   const [history, setHistory] = useState<BillData[]>([]);
   const [selectedBillId, setSelectedBillId] = useState<string>('');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isAddMonthModalOpen, setIsAddMonthModalOpen] = useState(false);
+
+  // Month addition dropdown selection
+  const [selectedMonth, setSelectedMonth] = useState('Sept');
+  const [selectedYear, setSelectedYear] = useState('2026');
   
   // Local state to hold edits until the "Save" button is clicked
   const [localBill, setLocalBill] = useState<BillData | null>(null);
@@ -161,7 +169,7 @@ export default function BillDashboard() {
       if (bills.length === 0) {
         setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
       } else {
-        // Robust numeric ID sorting so new timestamp IDs always remain at top
+        // Sort strictly by numeric IDs (timestamps) so newest months remain on top
         bills.sort((a, b) => {
           const idA = Number(a.id) || 0;
           const idB = Number(b.id) || 0;
@@ -170,7 +178,7 @@ export default function BillDashboard() {
 
         setHistory(bills);
         
-        // Preserve active month selection across snapshot updates
+        // Preserve active month selection across updates
         setSelectedBillId(prev => {
           if (prev && bills.some(b => b.id === prev)) {
             return prev;
@@ -203,7 +211,7 @@ export default function BillDashboard() {
     );
   }
 
-  // Password Login Screen (Blocks unauthenticated users)
+  // Password Login Screen
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans selection:bg-amber-500 selection:text-slate-950">
@@ -243,6 +251,7 @@ export default function BillDashboard() {
 
   // Explicit Save Action to Cloud
   const handleManualSave = async () => {
+    if (!localBill) return;
     try {
       await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
       alert("माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे! (Saved to Firestore)");
@@ -252,7 +261,16 @@ export default function BillDashboard() {
     }
   };
 
-  // Local state update (Stops database throttling)
+  // Cancel edits and revert local bill state to saved database state
+  const handleCancelEdit = () => {
+    const original = history.find(b => b.id === localBill.id);
+    if (original) {
+      setLocalBill(JSON.parse(JSON.stringify(original)));
+    }
+    setIsEditModalOpen(false);
+  };
+
+  // Local state update
   const updateActiveField = (path: string[], value: number | string) => {
     setLocalBill(prev => {
       if (!prev) return prev;
@@ -301,21 +319,20 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Add New Month Entry (Auto-saves current active month edits first)
-  const handleAddNewMonth = async () => {
+  // Add New Month Entry via Dropdown Selection
+  const handleConfirmAddMonth = async () => {
     if (!localBill) return;
 
-    // 1. Commit active month edits to cloud so current readings carry over accurately
+    // 1. First save current active month edits to cloud so current readings carry over accurately
     try {
       await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
     } catch (err) {
       console.error("Auto-save error before adding month:", err);
     }
 
-    const monthName = prompt("Enter Month & Year (e.g. Sept-2026):", "Sept-2026");
-    if (!monthName) return;
-
+    const monthName = `${selectedMonth}-${selectedYear}`;
     const newId = Date.now().toString();
+
     const newBill: BillData = {
       id: newId,
       month: monthName,
@@ -334,9 +351,10 @@ export default function BillDashboard() {
     try {
       await setDoc(doc(db, 'msedcl_bills', newId), newBill);
       setSelectedBillId(newId);
-      alert(`${monthName} जोडला गेला आहे आणि मागील रीडिंग आपोआप अपडेट झाली आहे!`);
+      setIsAddMonthModalOpen(false);
+      alert(`${monthName} जोडला गेला आहे! मागील रीडींग्स कॅरी फॉरवर्ड झाल्या आहेत.`);
     } catch (error) {
-      alert("Error adding month: " + error);
+      alert("महिना जोडताना अडचण आली: " + error);
     }
   };
 
@@ -517,7 +535,7 @@ export default function BillDashboard() {
                 <Save className="w-4 h-4" /> सेव्ह करा (Save)
               </button>
 
-              <button onClick={handleAddNewMonth} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
+              <button onClick={() => setIsAddMonthModalOpen(true)} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
                 <PlusCircle className="w-4 h-4" /> महिना जोडा
               </button>
 
@@ -957,6 +975,75 @@ export default function BillDashboard() {
         </div>
       </main>
 
+      {/* ADD NEW MONTH MODAL (DROPDOWN SELECTION) */}
+      {isAddMonthModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-base font-bold text-amber-400 flex items-center gap-2">
+                <PlusCircle className="w-5 h-5" /> नवीन महिना जोडा
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setIsAddMonthModalOpen(false)}
+                className="text-slate-400 hover:text-white text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="text-slate-300 block mb-1 font-semibold">महिना निवडा (Select Month)</label>
+                <select
+                  value={selectedMonth}
+                  onChange={(e) => setSelectedMonth(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none"
+                >
+                  {monthNames.map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-semibold">वर्ष निवडा (Select Year)</label>
+                <select
+                  value={selectedYear}
+                  onChange={(e) => setSelectedYear(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none"
+                >
+                  {availableYears.map(y => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400">
+                नवा महिना: <span className="text-amber-400 font-bold">{selectedMonth}-{selectedYear}</span>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end gap-2">
+              <button 
+                type="button" 
+                onClick={() => setIsAddMonthModalOpen(false)} 
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
+              >
+                रद्द करा
+              </button>
+              <button 
+                type="button" 
+                onClick={handleConfirmAddMonth}
+                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1"
+              >
+                <Check className="w-3.5 h-3.5" /> महिना जोडा
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* CHANGE PASSWORD MODAL */}
       {isChangePassModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
@@ -1030,9 +1117,18 @@ export default function BillDashboard() {
       {isEditModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-lg font-bold text-amber-400 flex items-center gap-2">
-              <Edit3 className="w-5 h-5" /> बिलात दुरुस्ती करा ({localBill.month})
-            </h3>
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-lg font-bold text-amber-400 flex items-center gap-2">
+                <Edit3 className="w-5 h-5" /> बिलात दुरुस्ती करा ({localBill.month})
+              </h3>
+              <button 
+                type="button" 
+                onClick={handleCancelEdit}
+                className="text-slate-400 hover:text-white text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
@@ -1093,9 +1189,20 @@ export default function BillDashboard() {
               </div>
             </div>
 
-            <div className="pt-4 flex justify-end">
-              <button onClick={handleManualSave} className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5">
-                <Check className="w-4 h-4" /> सेव्ह आणि बंद करा
+            <div className="pt-4 flex justify-end gap-2 border-t border-slate-800">
+              <button 
+                type="button" 
+                onClick={handleCancelEdit} 
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-sm"
+              >
+                रद्द करा (Cancel)
+              </button>
+              <button 
+                type="button" 
+                onClick={handleManualSave} 
+                className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5"
+              >
+                <Check className="w-4 h-4" /> सेव्ह करा (Save)
               </button>
             </div>
           </div>
