@@ -410,7 +410,7 @@ export default function BillDashboard() {
     }
   };
 
-  // Add New Month Entry
+  // Add New Month Entry with Automated Calculations
   const handleConfirmAddMonth = async () => {
     if (!localBill) return;
 
@@ -422,11 +422,15 @@ export default function BillDashboard() {
     const sourceBill = localBill;
     const newId = targetMonthName;
 
+    const mainUnitsNew = Math.max(0, sourceBill.readings.mainCurr - sourceBill.readings.mainCurr);
+    const newEnergy = calculateTotalEnergyCharge(mainUnitsNew);
+    const newFixedSum = Object.values(sourceBill.fixedPool).reduce((a, b) => a + b, 0);
+
     const newBill: BillData = {
       id: newId,
       month: targetMonthName,
-      totalBill: sourceBill.totalBill,
-      energyCharge: sourceBill.energyCharge,
+      totalBill: Math.round(newEnergy + newFixedSum),
+      energyCharge: Math.round(newEnergy),
       fixedPool: { ...sourceBill.fixedPool },
       readings: {
         mainPrev: sourceBill.readings.mainCurr, mainCurr: sourceBill.readings.mainCurr,
@@ -463,11 +467,22 @@ export default function BillDashboard() {
     }
   };
 
-  // CSV Export & Import Handlers
+  // CSV Export Handler with Dynamic Slab & Total Bill Calculation
   const handleExportCSV = () => {
     let csv = "ID,Month,TotalBill,EnergyCharge,FixedCharge,WheelingCharge,FAC,Duty,Adjustments,MainPrev,MainCurr,MotorPrev,MotorCurr,Son1Prev,Son1Curr,Son2Prev,Son2Curr,Son3Prev,Son3Curr\n";
+    
     sortedBills.forEach(b => {
-      csv += `${b.id},${b.month},${b.totalBill},${b.energyCharge},${b.fixedPool.fixedCharge},${b.fixedPool.wheelingCharge},${b.fixedPool.fac},${b.fixedPool.duty},${b.fixedPool.adjustments},${b.readings.mainPrev},${b.readings.mainCurr},${b.readings.motorPrev},${b.readings.motorCurr},${b.readings.son1Prev},${b.readings.son1Curr},${b.readings.son2Prev},${b.readings.son2Curr},${b.readings.son3Prev},${b.readings.son3Curr}\n`;
+      const units = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
+      const calculatedEnergy = calculateTotalEnergyCharge(units);
+      const fixedSum = (b.fixedPool.fixedCharge || 0) + 
+                       (b.fixedPool.wheelingCharge || 0) + 
+                       (b.fixedPool.fac || 0) + 
+                       (b.fixedPool.duty || 0) + 
+                       (b.fixedPool.adjustments || 0);
+      
+      const calculatedTotal = calculatedEnergy + fixedSum;
+
+      csv += `${b.id},${b.month},${calculatedTotal.toFixed(2)},${calculatedEnergy.toFixed(2)},${b.fixedPool.fixedCharge},${b.fixedPool.wheelingCharge},${b.fixedPool.fac},${b.fixedPool.duty},${b.fixedPool.adjustments},${b.readings.mainPrev},${b.readings.mainCurr},${b.readings.motorPrev},${b.readings.motorCurr},${b.readings.son1Prev},${b.readings.son1Curr},${b.readings.son2Prev},${b.readings.son2Curr},${b.readings.son3Prev},${b.readings.son3Curr}\n`;
     });
 
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -478,6 +493,7 @@ export default function BillDashboard() {
     a.click();
   };
 
+  // CSV Import Handler with Dynamic Recalculation
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -494,20 +510,30 @@ export default function BillDashboard() {
           const rawId = v[0] || v[1];
           const normKey = normalizeMonthKey(rawId);
 
+          const mainPrev = parseFloat(v[9]) || 0;
+          const mainCurr = parseFloat(v[10]) || 0;
+          const units = Math.max(0, mainCurr - mainPrev);
+
+          const fixedPool = {
+            fixedCharge: parseFloat(v[4]) || 0,
+            wheelingCharge: parseFloat(v[5]) || 0,
+            fac: parseFloat(v[6]) || 0,
+            duty: parseFloat(v[7]) || 0,
+            adjustments: parseFloat(v[8]) || 0,
+          };
+
+          const calculatedEnergy = calculateTotalEnergyCharge(units);
+          const fixedSum = Object.values(fixedPool).reduce((a, b) => a + b, 0);
+          const calculatedTotal = calculatedEnergy + fixedSum;
+
           const importedBill: BillData = {
             id: normKey,
             month: normKey,
-            totalBill: parseFloat(v[2]) || 0,
-            energyCharge: parseFloat(v[3]) || 0,
-            fixedPool: {
-              fixedCharge: parseFloat(v[4]) || 0,
-              wheelingCharge: parseFloat(v[5]) || 0,
-              fac: parseFloat(v[6]) || 0,
-              duty: parseFloat(v[7]) || 0,
-              adjustments: parseFloat(v[8]) || 0,
-            },
+            totalBill: Math.round(calculatedTotal),
+            energyCharge: Math.round(calculatedEnergy),
+            fixedPool,
             readings: {
-              mainPrev: parseFloat(v[9]) || 0, mainCurr: parseFloat(v[10]) || 0,
+              mainPrev, mainCurr,
               motorPrev: parseFloat(v[11]) || 0, motorCurr: parseFloat(v[12]) || 0,
               son1Prev: parseFloat(v[13]) || 0, son1Curr: parseFloat(v[14]) || 0,
               son2Prev: parseFloat(v[15]) || 0, son2Curr: parseFloat(v[16]) || 0,
@@ -516,7 +542,7 @@ export default function BillDashboard() {
           };
           await setDoc(doc(db, 'msedcl_bills', normKey), importedBill, { merge: true });
         }
-        alert('CSV data synced & normalized to cloud successfully!');
+        alert('CSV data synced & recalculated to cloud successfully!');
       } catch (err) {
         alert('Failed to parse CSV file. Please check format.');
       }
