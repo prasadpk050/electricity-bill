@@ -83,6 +83,33 @@ export default function BillDashboard() {
   const [son2Name, setSon2Name] = useState('PRAVIN');
   const [son3Name, setSon3Name] = useState('ANNA');
 
+  // Password Protection State
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [inputPassword, setInputPassword] = useState('');
+  const [passwordError, setPasswordError] = useState(false);
+
+  // Set your preferred password here:
+  const APP_PASSWORD = "1234";
+
+  // Check saved authentication status on load
+  useEffect(() => {
+    const savedAuth = localStorage.getItem('bill_app_authenticated');
+    if (savedAuth === 'true') {
+      setIsAuthenticated(true);
+    }
+  }, []);
+
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (inputPassword === APP_PASSWORD) {
+      setIsAuthenticated(true);
+      localStorage.setItem('bill_app_authenticated', 'true');
+      setPasswordError(false);
+    } else {
+      setPasswordError(true);
+    }
+  };
+
   // Real-time Cloud Sync with Firestore
   useEffect(() => {
     setIsMounted(true);
@@ -104,6 +131,7 @@ export default function BillDashboard() {
     return () => unsubscribe();
   }, [selectedBillId]);
 
+  // Loading Screen
   if (!isMounted || history.length === 0) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center font-sans">
@@ -111,6 +139,44 @@ export default function BillDashboard() {
           <Zap className="w-10 h-10 text-amber-400 animate-bounce mx-auto" />
           <p className="text-amber-400 text-xl font-bold tracking-wide">क्लाउड डाटा कनेक्ट होत आहे...</p>
         </div>
+      </div>
+    );
+  }
+
+  // Password Login Screen (Blocks unauthenticated users)
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans selection:bg-amber-500 selection:text-slate-950">
+        <form onSubmit={handleLogin} className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl">
+          <div className="text-center space-y-2">
+            <div className="bg-amber-500/10 border border-amber-500/30 p-3 rounded-full w-12 h-12 flex items-center justify-center mx-auto text-amber-400">
+              <Zap className="w-6 h-6 fill-amber-400" />
+            </div>
+            <h2 className="text-xl font-extrabold text-white">पासवर्ड टाका (Login)</h2>
+            <p className="text-xs text-slate-400">वीज बिल डॅशबोर्ड उघडण्यासाठी पासवर्ड आवश्यक आहे.</p>
+          </div>
+
+          <div className="space-y-2">
+            <input 
+              type="password" 
+              placeholder="Enter Password" 
+              value={inputPassword}
+              onChange={(e) => { setInputPassword(e.target.value); setPasswordError(false); }}
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-center text-amber-400 font-bold text-lg outline-none focus:border-amber-500 transition-colors"
+              autoFocus
+            />
+            {passwordError && (
+              <p className="text-xs text-rose-400 text-center font-semibold">चुकीचा पासवर्ड! पुन्हा प्रयत्न करा.</p>
+            )}
+          </div>
+
+          <button 
+            type="submit" 
+            className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10"
+          >
+            Unlock Dashboard
+          </button>
+        </form>
       </div>
     );
   }
