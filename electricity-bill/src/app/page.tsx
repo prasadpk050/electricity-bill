@@ -83,17 +83,17 @@ export default function BillDashboard() {
   const [isAddMonthModalOpen, setIsAddMonthModalOpen] = useState(false);
 
   // Month addition dropdown selection
-  const [selectedMonth, setSelectedMonth] = useState('Sept');
+  const [selectedMonth, setSelectedMonth] = useState('Aug');
   const [selectedYear, setSelectedYear] = useState('2026');
   
   // Local state to hold edits until the "Save" button is clicked
   const [localBill, setLocalBill] = useState<BillData | null>(null);
 
-  // Non-blocking toast (replaces alert() so the UI never "feels stuck")
+  // Non-blocking toast notification
   const [toast, setToast] = useState<string | null>(null);
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2500);
+    const t = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -181,7 +181,7 @@ export default function BillDashboard() {
           return;
         }
 
-        // Sort strictly by numeric IDs (timestamps) so newest months remain on top
+        // Sort strictly by numeric IDs (newest timestamp first)
         bills.sort((a, b) => {
           const idA = Number(a.id) || 0;
           const idB = Number(b.id) || 0;
@@ -199,11 +199,6 @@ export default function BillDashboard() {
         });
       },
       (error) => {
-        // Surface connection/permission failures instead of silently
-        // falling back to defaults. If you see this in the console,
-        // check your Firebase security rules and that the
-        // NEXT_PUBLIC_FIREBASE_* env vars are set in Vercel's
-        // Production environment (not just Preview/Development).
         console.error('Firestore onSnapshot error:', error);
         setToast('क्लाउड कनेक्शन अडचण: ' + error.message);
       }
@@ -212,12 +207,6 @@ export default function BillDashboard() {
     return () => unsubscribe();
   }, []);
 
-  // ---- FIX: only reload localBill from `history` when the SELECTED
-  // MONTH actually changes, not every time Firestore sends a snapshot
-  // (which happens constantly, including echoes of your own saves).
-  // Previously this effect re-ran on every `history` update and wiped
-  // out whatever you were actively editing/viewing, replacing it with
-  // stale saved data — that's what caused "Sept shows Aug/July data".
   const lastLoadedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -231,10 +220,26 @@ export default function BillDashboard() {
       setLocalBill(JSON.parse(JSON.stringify(found)));
       lastLoadedIdRef.current = selectedBillId;
     }
-    // else: history updated in the background (e.g. our own save
-    // echoing back) but the user hasn't switched months — leave
-    // localBill (and any unsaved edits) alone.
   }, [selectedBillId, history, localBill]);
+
+  // Open "Add Month" Modal & auto-suggest next logical month
+  const handleOpenAddMonthModal = () => {
+    const latestBill = history[0] || localBill;
+    if (latestBill && latestBill.month) {
+      const parts = latestBill.month.split('-');
+      if (parts.length === 2) {
+        const currentMIndex = monthNames.indexOf(parts[0]);
+        if (currentMIndex !== -1) {
+          const nextMIndex = (currentMIndex + 1) % 12;
+          setSelectedMonth(monthNames[nextMIndex]);
+          let yearNum = parseInt(parts[1]) || 2026;
+          if (nextMIndex === 0) yearNum += 1;
+          setSelectedYear(yearNum.toString());
+        }
+      }
+    }
+    setIsAddMonthModalOpen(true);
+  };
 
   // Loading Screen
   if (!isMounted || history.length === 0 || !localBill) {
@@ -286,22 +291,20 @@ export default function BillDashboard() {
     );
   }
 
-  // Explicit Save Action to Cloud — closes the modal immediately and
-  // shows a non-blocking toast instead of a blocking alert(), so it
-  // never feels "stuck" waiting for you to dismiss a popup.
+  // Explicit Save Action to Cloud
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
     try {
       await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
-      lastLoadedIdRef.current = localBill.id; // treat as already-loaded, avoid self-clobber
+      lastLoadedIdRef.current = localBill.id;
       setToast('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
     } catch (error: any) {
       setToast('सेव्ह करताना अडचण आली: ' + error.message);
     }
   };
 
-  // Cancel edits and revert local bill state to saved database state
+  // Cancel edits and revert local bill state
   const handleCancelEdit = () => {
     const original = history.find(b => b.id === localBill.id);
     if (original) {
@@ -359,54 +362,55 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Add New Month Entry via Dropdown Selection
+  // Add New Month Entry: ALWAYS uses readings from the latest month in history
   const handleConfirmAddMonth = async () => {
     if (!localBill) return;
 
     const monthName = `${selectedMonth}-${selectedYear}`;
 
-    // Guard against creating a duplicate month entry
+    // Guard against duplicate month entry
     if (history.some(b => b.month === monthName)) {
-      setToast(`${monthName} आधीच अस्तित्वात आहे.`);
-      setIsAddMonthModalOpen(false);
+      setToast(`त्रुटी: ${monthName} हा महिना आधीच जोडलेला आहे!`);
       return;
     }
 
-    // 1. First save current active month edits to cloud so current readings carry over accurately
+    // 1. Commit active month edits to cloud first
     try {
       await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
       lastLoadedIdRef.current = localBill.id;
     } catch (err) {
       console.error("Auto-save error before adding month:", err);
-      setToast('चालू महिना सेव्ह करताना अडचण आली, तरीही पुढे जात आहे.');
     }
+
+    // 2. Always grab the latest chronological month in history to carry over starting readings
+    const sourceBill = history[0] || localBill;
 
     const newId = Date.now().toString();
 
     const newBill: BillData = {
       id: newId,
       month: monthName,
-      totalBill: localBill.totalBill,
-      energyCharge: localBill.energyCharge,
-      fixedPool: { ...localBill.fixedPool },
+      totalBill: sourceBill.totalBill,
+      energyCharge: sourceBill.energyCharge,
+      fixedPool: { ...sourceBill.fixedPool },
       readings: {
-        mainPrev: localBill.readings.mainCurr, mainCurr: localBill.readings.mainCurr,
-        motorPrev: localBill.readings.motorCurr, motorCurr: localBill.readings.motorCurr,
-        son1Prev: localBill.readings.son1Curr, son1Curr: localBill.readings.son1Curr,
-        son2Prev: localBill.readings.son2Curr, son2Curr: localBill.readings.son2Curr,
-        son3Prev: localBill.readings.son3Curr, son3Curr: localBill.readings.son3Curr,
+        mainPrev: sourceBill.readings.mainCurr, mainCurr: sourceBill.readings.mainCurr,
+        motorPrev: sourceBill.readings.motorCurr, motorCurr: sourceBill.readings.motorCurr,
+        son1Prev: sourceBill.readings.son1Curr, son1Curr: sourceBill.readings.son1Curr,
+        son2Prev: sourceBill.readings.son2Curr, son2Curr: sourceBill.readings.son2Curr,
+        son3Prev: sourceBill.readings.son3Curr, son3Curr: sourceBill.readings.son3Curr,
       }
     };
 
     try {
       await setDoc(doc(db, 'msedcl_bills', newId), newBill);
       setIsAddMonthModalOpen(false);
-      // Switch to the new month explicitly and load it directly —
-      // don't wait on the next onSnapshot round-trip.
+
+      // Instantly select & display the new month
       lastLoadedIdRef.current = newId;
       setLocalBill(JSON.parse(JSON.stringify(newBill)));
       setSelectedBillId(newId);
-      setToast(`${monthName} जोडला गेला आहे! मागील रीडींग्स कॅरी फॉरवर्ड झाल्या आहेत.`);
+      setToast(`${monthName} जोडला गेला आहे! मागील रीडींग्स (${sourceBill.month}) यशस्वीरित्या कॅरी फॉरवर्ड झाल्या.`);
     } catch (error: any) {
       setToast('महिना जोडताना अडचण आली: ' + error.message);
     }
@@ -570,7 +574,7 @@ export default function BillDashboard() {
         }
       `}</style>
 
-      {/* Non-blocking toast notification (replaces alert()) */}
+      {/* Non-blocking Toast Banner */}
       {toast && (
         <div className="print-hide fixed top-4 left-1/2 -translate-x-1/2 z-[60] bg-slate-900 border border-amber-500/40 text-slate-100 text-sm font-semibold px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 max-w-[90vw]">
           <Check className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -601,7 +605,7 @@ export default function BillDashboard() {
                 <Save className="w-4 h-4" /> सेव्ह करा (Save)
               </button>
 
-              <button onClick={() => setIsAddMonthModalOpen(true)} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
+              <button onClick={handleOpenAddMonthModal} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
                 <PlusCircle className="w-4 h-4" /> महिना जोडा
               </button>
 
@@ -1087,7 +1091,7 @@ export default function BillDashboard() {
 
               <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400">
                 नवा महिना: <span className="text-amber-400 font-bold">{selectedMonth}-{selectedYear}</span>
-                {" — करंट रीडिंग ("}{localBill.month}{") पासून कॅरी फॉरवर्ड होईल"}
+                {" — रीडींग्स मागील महिन्यापासून ("}{(history[0] || localBill).month}{") कॅरी फॉरवर्ड होतील"}
               </div>
             </div>
 
