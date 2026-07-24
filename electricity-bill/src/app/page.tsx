@@ -161,7 +161,7 @@ export default function BillDashboard() {
       if (bills.length === 0) {
         setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
       } else {
-        // Robust sort: newest numeric IDs first
+        // Robust numeric ID sorting so new timestamp IDs always remain at top
         bills.sort((a, b) => {
           const idA = Number(a.id) || 0;
           const idB = Number(b.id) || 0;
@@ -170,7 +170,7 @@ export default function BillDashboard() {
 
         setHistory(bills);
         
-        // Preserve current month selection across real-time updates
+        // Preserve active month selection across snapshot updates
         setSelectedBillId(prev => {
           if (prev && bills.some(b => b.id === prev)) {
             return prev;
@@ -301,9 +301,18 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Add New Month Entry
+  // Add New Month Entry (Auto-saves current active month edits first)
   const handleAddNewMonth = async () => {
-    const monthName = prompt("Enter Month & Year (e.g. Aug-2026):", "Aug-2026");
+    if (!localBill) return;
+
+    // 1. Commit active month edits to cloud so current readings carry over accurately
+    try {
+      await setDoc(doc(db, 'msedcl_bills', localBill.id), localBill);
+    } catch (err) {
+      console.error("Auto-save error before adding month:", err);
+    }
+
+    const monthName = prompt("Enter Month & Year (e.g. Sept-2026):", "Sept-2026");
     if (!monthName) return;
 
     const newId = Date.now().toString();
@@ -325,6 +334,7 @@ export default function BillDashboard() {
     try {
       await setDoc(doc(db, 'msedcl_bills', newId), newBill);
       setSelectedBillId(newId);
+      alert(`${monthName} जोडला गेला आहे आणि मागील रीडिंग आपोआप अपडेट झाली आहे!`);
     } catch (error) {
       alert("Error adding month: " + error);
     }
