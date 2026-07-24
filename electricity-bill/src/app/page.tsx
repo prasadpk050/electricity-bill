@@ -21,7 +21,7 @@ interface BillData {
     wheelingCharge: number;
     fac: number;
     duty: number;
-    adjustments: number;
+    adjustments: number; // Represents निव्वळ थकबाकी / जमा
   };
   readings: {
     mainPrev: number; mainCurr: number;
@@ -37,8 +37,8 @@ const initialDefaultBill: BillData = {
   month: "Jul-2026",
   totalBill: 1400,
   energyCharge: 828,
-  fixedPool: { fixedCharge: 130, wheelingCharge: 224, fac: 34, duty: 194.56, adjustments: 10.56 },
-  readings: { mainPrev: 10519, mainCurr: 10659, motorPrev: 500, motorCurr: 520, son1Prev: 1200, son1Curr: 1240, son2Prev: 1500, son2Curr: 1540, son3Prev: 0, son3Curr: 0 }
+  fixedPool: { fixedCharge: 130, wheelingCharge: 224, fac: 34, duty: 194.56, adjustments: 10.74 },
+  readings: { mainPrev: 10659, mainCurr: 10799, motorPrev: 0, motorCurr: 20, son1Prev: 0, son1Curr: 40, son2Prev: 0, son2Curr: 40, son3Prev: 0, son3Curr: 0 }
 };
 
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
@@ -120,7 +120,7 @@ export default function BillDashboard() {
   // Local state to hold edits until the "Save" button is clicked
   const [localBill, setLocalBill] = useState<BillData | null>(null);
 
-  // Custom Names
+  // Custom Display Names
   const [son1Name, setSon1Name] = useState('SUDHIR');
   const [son2Name, setSon2Name] = useState('PRAVIN');
   const [son3Name, setSon3Name] = useState('ANNA');
@@ -252,7 +252,7 @@ export default function BillDashboard() {
     return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
   });
 
-  // Open "Add Month" Modal & auto-suggest next logical month
+  // Open "Add Month" Modal
   const handleOpenAddMonthModal = () => {
     const latestBill = sortedBills[0] || localBill;
     if (latestBill && latestBill.month) {
@@ -324,7 +324,7 @@ export default function BillDashboard() {
     );
   }
 
-  // Cancel edits and revert local bill state
+  // Cancel edits
   const handleCancelEdit = () => {
     const original = history.find(b => b.id === localBill.id);
     if (original) {
@@ -353,21 +353,24 @@ export default function BillDashboard() {
 
   const parentsUnits = Math.max(0, mainUnits - (motorUnits + son1Units + son2Units + son3Units));
 
-  // 1. Calculate Total Energy Charge dynamically from total main units
+  // Slab Energy Charge Calculation
   const calculatedEnergyCharge = calculateTotalEnergyCharge(mainUnits);
 
-  // Fixed Charges Calculation
+  // Fixed Charges + Nivval Thakbaki Sum
   const totalBundledFixed = Object.values(localBill.fixedPool).reduce((a, b) => a + b, 0);
 
-  // DYNAMIC TOTAL BILL (Calculated Energy Charge + Fixed Pool Sum)
-  const actualTotalBill = calculatedEnergyCharge + totalBundledFixed;
+  // Raw Bill Sum
+  const rawTotalBill = calculatedEnergyCharge + totalBundledFixed;
 
-  // 2. Derive Effective Rate per Unit
+  // Official MSEDCL Rounding Rule (Unit digit is always 0 -> Math.floor to nearest 10)
+  const actualTotalBill = Math.floor(rawTotalBill / 10) * 10;
+
+  // Derived Effective Rate per Unit
   const energyRate = mainUnits > 0 ? calculatedEnergyCharge / mainUnits : 0;
 
   const fixedSharePerSon = totalBundledFixed / 3;
 
-  // Shared Costs Calculations using Effective Energy Rate
+  // Shared Costs
   const totalWaterCost = motorUnits * energyRate;
   const waterSharePerSon = totalWaterCost / 3;
 
@@ -386,18 +389,17 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Explicit Save Action to Cloud
+  // Save to Cloud
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
 
-    // Save with calculated total bill and normalized ID
     const billToSave: BillData = {
       ...localBill,
       id: normalizeMonthKey(localBill.id),
       month: normalizeMonthKey(localBill.month),
-      totalBill: Math.round(actualTotalBill),
-      energyCharge: Math.round(calculatedEnergyCharge)
+      totalBill: actualTotalBill,
+      energyCharge: parseFloat(calculatedEnergyCharge.toFixed(2))
     };
 
     try {
@@ -410,7 +412,7 @@ export default function BillDashboard() {
     }
   };
 
-  // Add New Month Entry with Automated Calculations
+  // Add New Month Entry
   const handleConfirmAddMonth = async () => {
     if (!localBill) return;
 
@@ -422,15 +424,11 @@ export default function BillDashboard() {
     const sourceBill = localBill;
     const newId = targetMonthName;
 
-    const mainUnitsNew = Math.max(0, sourceBill.readings.mainCurr - sourceBill.readings.mainCurr);
-    const newEnergy = calculateTotalEnergyCharge(mainUnitsNew);
-    const newFixedSum = Object.values(sourceBill.fixedPool).reduce((a, b) => a + b, 0);
-
     const newBill: BillData = {
       id: newId,
       month: targetMonthName,
-      totalBill: Math.round(newEnergy + newFixedSum),
-      energyCharge: Math.round(newEnergy),
+      totalBill: 0,
+      energyCharge: 0,
       fixedPool: { ...sourceBill.fixedPool },
       readings: {
         mainPrev: sourceBill.readings.mainCurr, mainCurr: sourceBill.readings.mainCurr,
@@ -467,22 +465,17 @@ export default function BillDashboard() {
     }
   };
 
-  // CSV Export Handler with Dynamic Slab & Total Bill Calculation
+  // Export CSV Handler
   const handleExportCSV = () => {
-    let csv = "ID,Month,TotalBill,EnergyCharge,FixedCharge,WheelingCharge,FAC,Duty,Adjustments,MainPrev,MainCurr,MotorPrev,MotorCurr,Son1Prev,Son1Curr,Son2Prev,Son2Curr,Son3Prev,Son3Curr\n";
+    let csv = "ID,Month,TotalBill,EnergyCharge,FixedCharge,WheelingCharge,FAC,Duty,NetArrears,MainPrev,MainCurr,MotorPrev,MotorCurr,Son1Prev,Son1Curr,Son2Prev,Son2Curr,Son3Prev,Son3Curr\n";
     
     sortedBills.forEach(b => {
       const units = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
-      const calculatedEnergy = calculateTotalEnergyCharge(units);
-      const fixedSum = (b.fixedPool.fixedCharge || 0) + 
-                       (b.fixedPool.wheelingCharge || 0) + 
-                       (b.fixedPool.fac || 0) + 
-                       (b.fixedPool.duty || 0) + 
-                       (b.fixedPool.adjustments || 0);
-      
-      const calculatedTotal = calculatedEnergy + fixedSum;
+      const eCharge = calculateTotalEnergyCharge(units);
+      const fixedSum = Object.values(b.fixedPool).reduce((x, y) => x + y, 0);
+      const computedRoundedTotal = Math.floor((eCharge + fixedSum) / 10) * 10;
 
-      csv += `${b.id},${b.month},${calculatedTotal.toFixed(2)},${calculatedEnergy.toFixed(2)},${b.fixedPool.fixedCharge},${b.fixedPool.wheelingCharge},${b.fixedPool.fac},${b.fixedPool.duty},${b.fixedPool.adjustments},${b.readings.mainPrev},${b.readings.mainCurr},${b.readings.motorPrev},${b.readings.motorCurr},${b.readings.son1Prev},${b.readings.son1Curr},${b.readings.son2Prev},${b.readings.son2Curr},${b.readings.son3Prev},${b.readings.son3Curr}\n`;
+      csv += `${b.id},${b.month},${b.totalBill || computedRoundedTotal},${eCharge.toFixed(2)},${b.fixedPool.fixedCharge},${b.fixedPool.wheelingCharge},${b.fixedPool.fac},${b.fixedPool.duty},${b.fixedPool.adjustments},${b.readings.mainPrev},${b.readings.mainCurr},${b.readings.motorPrev},${b.readings.motorCurr},${b.readings.son1Prev},${b.readings.son1Curr},${b.readings.son2Prev},${b.readings.son2Curr},${b.readings.son3Prev},${b.readings.son3Curr}\n`;
     });
 
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -493,7 +486,7 @@ export default function BillDashboard() {
     a.click();
   };
 
-  // CSV Import Handler with Dynamic Recalculation
+  // Import CSV Handler with MSEDCL Unit-Digit 0 Rounding
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -522,15 +515,16 @@ export default function BillDashboard() {
             adjustments: parseFloat(v[8]) || 0,
           };
 
-          const calculatedEnergy = calculateTotalEnergyCharge(units);
-          const fixedSum = Object.values(fixedPool).reduce((a, b) => a + b, 0);
-          const calculatedTotal = calculatedEnergy + fixedSum;
+          const eCharge = calculateTotalEnergyCharge(units);
+          const fixedSum = Object.values(fixedPool).reduce((x, y) => x + y, 0);
+          const rawTotal = eCharge + fixedSum;
+          const msedclRoundedTotal = Math.floor(rawTotal / 10) * 10;
 
           const importedBill: BillData = {
             id: normKey,
             month: normKey,
-            totalBill: Math.round(calculatedTotal),
-            energyCharge: Math.round(calculatedEnergy),
+            totalBill: msedclRoundedTotal,
+            energyCharge: parseFloat(eCharge.toFixed(2)),
             fixedPool,
             readings: {
               mainPrev, mainCurr,
@@ -542,7 +536,7 @@ export default function BillDashboard() {
           };
           await setDoc(doc(db, 'msedcl_bills', normKey), importedBill, { merge: true });
         }
-        alert('CSV data synced & recalculated to cloud successfully!');
+        alert('CSV data imported and rounded to MSEDCL unit-digit 0 format successfully!');
       } catch (err) {
         alert('Failed to parse CSV file. Please check format.');
       }
@@ -703,7 +697,7 @@ export default function BillDashboard() {
             </div>
           </div>
 
-          {/* Name Customization, Password Change & Data Tools */}
+          {/* Display Name Customization & Data Tools */}
           <div className="print-hide grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-2">
               <div className="flex items-center justify-between">
@@ -748,12 +742,12 @@ export default function BillDashboard() {
           {/* Quick Summary Cards */}
           <div className="grid grid-cols-4 gap-4" key={`summary-${localBill.id}`}>
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">एकूण बिल (Total Bill)</p>
-              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{Math.round(actualTotalBill)}</p>
+              <p className="text-slate-400 print-sub-text text-xs font-bold">एकूण बिल (पूर्णांक देयक)</p>
+              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{actualTotalBill}</p>
             </div>
 
             <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">ऊर्जा आकार (Calculated Energy Charge)</p>
+              <p className="text-slate-400 print-sub-text text-xs font-bold">ऊर्जा आकार (Energy Charge)</p>
               <p className="text-2xl font-black text-blue-400 print:text-blue-700 mt-1">₹{calculatedEnergyCharge.toFixed(2)}</p>
             </div>
 
@@ -783,16 +777,16 @@ export default function BillDashboard() {
                 <input type="number" value={localBill.fixedPool.wheelingCharge} onChange={(e) => updateActiveField(['fixedPool', 'wheelingCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">इंधन आकार</p>
+                <p className="text-slate-400 print-sub-text font-semibold">इंधन आकार (FAC)</p>
                 <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">वीज शुल्क</p>
+                <p className="text-slate-400 print-sub-text font-semibold">वीज शुल्क (Duty)</p>
                 <input type="number" value={localBill.fixedPool.duty} onChange={(e) => updateActiveField(['fixedPool', 'duty'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
               </div>
               <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">समायोजन</p>
-                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+                <p className="text-slate-400 print-sub-text font-semibold text-emerald-400">निव्वळ थकबाकी/जमा</p>
+                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-emerald-400 print-header-text font-bold mt-1 outline-none" />
               </div>
             </div>
             <p className="text-xs text-slate-400 print-sub-text pt-1">
@@ -1276,21 +1270,21 @@ export default function BillDashboard() {
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
-                <label className="text-slate-400 block mb-1">एकूण बिल (Total ₹ - Autosum Enabled)</label>
+                <label className="text-slate-400 block mb-1">एकूण बिल (पूर्णांक देयक ₹ - Locked)</label>
                 <input 
                   type="number" 
                   disabled
-                  value={Math.round(actualTotalBill)} 
-                  className="w-full bg-slate-950/50 border border-slate-800/80 rounded-xl px-3 py-2 text-amber-400 font-extrabold outline-none cursor-not-allowed" 
+                  value={actualTotalBill} 
+                  className="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-emerald-400 font-extrabold outline-none cursor-not-allowed" 
                 />
               </div>
               <div>
-                <label className="text-slate-400 block mb-1">ऊर्जा आकार (Energy Charge ₹)</label>
+                <label className="text-slate-400 block mb-1">ऊर्जा आकार (Energy Charge ₹ - Calculated)</label>
                 <input 
                   type="number" 
                   disabled
                   value={calculatedEnergyCharge.toFixed(2)} 
-                  className="w-full bg-slate-950/50 border border-slate-800/80 rounded-xl px-3 py-2 text-blue-400 font-extrabold outline-none cursor-not-allowed" 
+                  className="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-blue-400 font-extrabold outline-none cursor-not-allowed" 
                 />
               </div>
             </div>
@@ -1306,16 +1300,16 @@ export default function BillDashboard() {
                 <input type="number" value={localBill.fixedPool.wheelingCharge} onChange={(e) => updateActiveField(['fixedPool', 'wheelingCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
-                <label className="text-slate-400 block mb-1 text-[10px]">इंधन आकार</label>
+                <label className="text-slate-400 block mb-1 text-[10px]">इंधन आकार (FAC)</label>
                 <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
-                <label className="text-slate-400 block mb-1 text-[10px]">वीज शुल्क</label>
+                <label className="text-slate-400 block mb-1 text-[10px]">वीज शुल्क (Duty)</label>
                 <input type="number" value={localBill.fixedPool.duty} onChange={(e) => updateActiveField(['fixedPool', 'duty'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
               </div>
               <div>
-                <label className="text-slate-400 block mb-1 text-[10px]">समायोजन</label>
-                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2 py-1.5 text-slate-200 outline-none" />
+                <label className="text-amber-400 block mb-1 text-[10px] font-bold">निव्वळ थकबाकी/जमा</label>
+                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-2 py-1.5 text-amber-400 font-bold outline-none" />
               </div>
             </div>
 
