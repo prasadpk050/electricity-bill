@@ -8,17 +8,17 @@ import {
 import { 
   Zap, Droplet, User, Share2, BarChart2, Edit3, 
   ShieldAlert, FileText, Download, Upload, PlusCircle, 
-  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X, AlertTriangle, ArrowUpDown, Settings, RefreshCw
+  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X, AlertTriangle, ArrowUpDown, Settings
 } from 'lucide-react';
 
 interface TariffConfig {
-  slab1: number; // 0-100
-  slab2: number; // 101-300
-  slab3: number; // 301-500
-  slab4: number; // 501-1000
-  slab5: number; // Above 1000
-  wheelingRate: number; // ₹ per unit (default 1.60)
-  dutyPercent: number; // % (default 16%)
+  slab1: number;
+  slab2: number;
+  slab3: number;
+  slab4: number;
+  slab5: number;
+  wheelingRate: number;
+  dutyPercent: number;
 }
 
 interface BillData {
@@ -33,7 +33,7 @@ interface BillData {
     wheelingCharge: number;
     fac: number;
     duty: number;
-    adjustments: number; // Represents निव्वळ थकबाकी / जमा
+    adjustments: number;
   };
   readings: {
     mainPrev: number; mainCurr: number;
@@ -65,13 +65,12 @@ const initialDefaultBill: BillData = {
 };
 
 const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const availableYears = ["2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030"];
+const availableYears = ["2024", "2025", "2026", "2027", "2028", "2029", "2030"];
 
-// Strict Month Key Normalizer: Cleans spaces, unifies 'Sept' -> 'Sep', and formats short/long years
 const sanitizeMonthKey = (rawKey: string): string => {
   if (!rawKey) return 'Jul-2026';
   let cleaned = rawKey.trim().replace(/\s+/g, '');
-  cleaned = cleaned.replace(/^Sept-/i, 'Sep-'); // Standardize Sept -> Sep
+  cleaned = cleaned.replace(/^Sept-/i, 'Sep-');
   
   const parts = cleaned.split('-');
   if (parts.length !== 2) return cleaned;
@@ -81,12 +80,11 @@ const sanitizeMonthKey = (rawKey: string): string => {
   if (m === 'Sept') m = 'Sep';
 
   if (y.length === 2) {
-    y = `20${y}`; // convert 25 -> 2025
+    y = `20${y}`;
   }
   return `${m}-${y}`;
 };
 
-// Parses month keys into numeric timestamps for accurate multi-year sorting
 const parseMonthKey = (key: string): number => {
   if (!key) return 0;
   const normalized = sanitizeMonthKey(key);
@@ -101,7 +99,6 @@ const parseMonthKey = (key: string): number => {
   return new Date(year, monthIndex, 1).getTime();
 };
 
-// MSEDCL Slab-Based Energy Charge Helper Function
 const calculateTotalEnergyCharge = (totalUnits: number, config: TariffConfig = defaultTariffConfig): number => {
   if (totalUnits <= 0) return 0;
 
@@ -113,17 +110,14 @@ const calculateTotalEnergyCharge = (totalUnits: number, config: TariffConfig = d
     const slab2Units = Math.min(totalUnits - 100, 200);
     totalCharge += slab2Units * config.slab2;
   }
-
   if (totalUnits > 300) {
     const slab3Units = Math.min(totalUnits - 300, 200);
     totalCharge += slab3Units * config.slab3;
   }
-
   if (totalUnits > 500) {
     const slab4Units = Math.min(totalUnits - 500, 500);
     totalCharge += slab4Units * config.slab4;
   }
-
   if (totalUnits > 1000) {
     const slab5Units = totalUnits - 1000;
     totalCharge += slab5Units * config.slab5;
@@ -139,6 +133,7 @@ export default function BillDashboard() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isTariffModalOpen, setIsTariffModalOpen] = useState(false);
   const [isAddMonthModalOpen, setIsAddMonthModalOpen] = useState(false);
+  const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
 
   // Sorting State
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
@@ -168,16 +163,16 @@ export default function BillDashboard() {
   const [passChangeError, setPassChangeError] = useState('');
   const [passChangeSuccess, setPassChangeSuccess] = useState(false);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [pendingCsvFile, setPendingCsvFile] = useState<File | null>(null);
+  const [isImportConfirmOpen, setIsImportConfirmOpen] = useState(false);
+
   useEffect(() => {
     const savedPassword = localStorage.getItem('bill_app_password');
-    if (savedPassword) {
-      setAppPassword(savedPassword);
-    }
+    if (savedPassword) setAppPassword(savedPassword);
 
     const savedAuth = localStorage.getItem('bill_app_authenticated');
-    if (savedAuth === 'true') {
-      setIsAuthenticated(true);
-    }
+    if (savedAuth === 'true') setIsAuthenticated(true);
   }, []);
 
   const handleLogin = (e: React.FormEvent) => {
@@ -230,6 +225,8 @@ export default function BillDashboard() {
 
         if (rawDocs.length === 0) {
           setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
+          setHistory([initialDefaultBill]);
+          setSelectedBillId(initialDefaultBill.id);
           return;
         }
 
@@ -250,16 +247,20 @@ export default function BillDashboard() {
           uniqueBillsMap.set(normKey, cleanBill);
         });
 
-        const deduplicatedBills = Array.from(uniqueBillsMap.values());
+        // Always sort chronologically DESC first
+        const sorted = Array.from(uniqueBillsMap.values()).sort(
+          (a, b) => parseMonthKey(b.id) - parseMonthKey(a.id)
+        );
 
-        setHistory(deduplicatedBills);
+        setHistory(sorted);
 
         setSelectedBillId(prev => {
           const normPrev = sanitizeMonthKey(prev);
-          if (normPrev && deduplicatedBills.some(b => b.id === normPrev)) {
+          if (normPrev && sorted.some(b => b.id === normPrev)) {
             return normPrev;
           }
-          return deduplicatedBills[0]?.id || 'Jul-2026';
+          // Default to top-most (most recent) month
+          return sorted[0]?.id || 'Jul-2026';
         });
       },
       (error) => {
@@ -273,22 +274,22 @@ export default function BillDashboard() {
 
   const lastLoadedIdRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    const found = history.find(b => b.id === selectedBillId) || history[0];
-    if (!found) return;
-
-    if (lastLoadedIdRef.current !== selectedBillId || !localBill) {
-      setLocalBill(JSON.parse(JSON.stringify(found)));
-      lastLoadedIdRef.current = selectedBillId;
-    }
-  }, [selectedBillId, history, localBill]);
-
-  // Chronologically Sorted Unique Bills List
+  // Chronologically Sorted Bills List based on user toggle
   const sortedBills = [...history].sort((a, b) => {
     const timeA = parseMonthKey(a.id);
     const timeB = parseMonthKey(b.id);
     return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
   });
+
+  useEffect(() => {
+    const target = sortedBills.find(b => b.id === selectedBillId) || sortedBills[0];
+    if (!target) return;
+
+    if (lastLoadedIdRef.current !== target.id || !localBill) {
+      setLocalBill(JSON.parse(JSON.stringify(target)));
+      lastLoadedIdRef.current = target.id;
+    }
+  }, [selectedBillId, sortedBills, localBill]);
 
   const handleOpenAddMonthModal = () => {
     const latestBill = sortedBills[0] || localBill;
@@ -299,7 +300,7 @@ export default function BillDashboard() {
         if (currentMIndex !== -1) {
           const nextMIndex = (currentMIndex + 1) % 12;
           setSelectedMonth(monthNames[nextMIndex]);
-          let yearNum = parseInt(parts[1]) || 2026;
+          let yearNum = parseInt(parts[1], 10) || 2026;
           if (nextMIndex === 0) yearNum += 1;
           setSelectedYear(yearNum.toString());
         }
@@ -324,7 +325,7 @@ export default function BillDashboard() {
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans selection:bg-amber-500 selection:text-slate-950">
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans">
         <form onSubmit={handleLogin} className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl">
           <div className="text-center space-y-2">
             <div className="bg-amber-500/10 border border-amber-500/30 p-3 rounded-full w-12 h-12 flex items-center justify-center mx-auto text-amber-400">
@@ -381,7 +382,7 @@ export default function BillDashboard() {
     });
   };
 
-  // Unit Calculations
+  // Calculations
   const mainUnits = Math.max(0, localBill.readings.mainCurr - localBill.readings.mainPrev);
   const motorUnits = Math.max(0, localBill.readings.motorCurr - localBill.readings.motorPrev);
   const son1Units = Math.max(0, localBill.readings.son1Curr - localBill.readings.son1Prev);
@@ -425,7 +426,6 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Robust Save: Cleans both normalized ID and removes any obsolete raw duplicate docs
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
@@ -491,52 +491,44 @@ export default function BillDashboard() {
       lastLoadedIdRef.current = newId;
       setLocalBill(JSON.parse(JSON.stringify(newBill)));
       setSelectedBillId(newId);
-      alert(`${targetMonthName} जोडला गेला आहे!`);
     } catch (error: any) {
       alert('महिना जोडताना अडचण आली: ' + error.message);
     }
   };
 
-  // Comprehensive Cloud Delete: Deletes sanitized ID and all raw doc representations in Firestore
-  const handleDeleteMonth = async (id: string) => {
-    if (history.length <= 1) {
-      alert('किमान एक बिल नोंद शिल्लक असणे आवश्यक आहे.');
-      return;
-    }
-    if (!confirm(`तुम्हाला खात्री आहे का की "${id}" बिल नोंद कायमची हटवायची आहे?`)) return;
+  // Cloud Delete Execution
+  const executeDeleteMonth = async () => {
+    if (!deleteCandidateId) return;
+    const targetId = deleteCandidateId;
+    setDeleteCandidateId(null);
 
-    const cleanKey = sanitizeMonthKey(id);
-    const shortYearKey = cleanKey.replace('-20', '-'); // e.g. Oct-26
+    const cleanKey = sanitizeMonthKey(targetId);
 
     try {
-      // Delete all possible ID variants from Firestore
-      const keysToDelete = [cleanKey, shortYearKey, id, `${cleanKey} `, `${shortYearKey} `];
-      
       const snap = await getDocs(collection(db, 'msedcl_bills'));
-      const deletePromises: Promise<void>[] = [];
+      const deletes: Promise<void>[] = [];
       
       snap.forEach(d => {
         const rawId = d.id;
         const norm = sanitizeMonthKey(rawId);
-        if (norm === cleanKey || keysToDelete.includes(rawId)) {
-          deletePromises.push(deleteDoc(doc(db, 'msedcl_bills', rawId)));
+        if (norm === cleanKey || rawId === targetId) {
+          deletes.push(deleteDoc(doc(db, 'msedcl_bills', rawId)));
         }
       });
 
-      await Promise.all(deletePromises);
+      await Promise.all(deletes);
 
-      const remaining = history.filter(b => b.id !== cleanKey);
-      if (remaining.length > 0) {
-        lastLoadedIdRef.current = remaining[0].id;
-        setSelectedBillId(remaining[0].id);
+      const nextRemaining = sortedBills.filter(b => b.id !== cleanKey);
+      if (nextRemaining.length > 0) {
+        lastLoadedIdRef.current = nextRemaining[0].id;
+        setSelectedBillId(nextRemaining[0].id);
+        setLocalBill(JSON.parse(JSON.stringify(nextRemaining[0])));
       }
-      alert(`"${id}" नोंद क्लाउडवरून यशस्वीरित्या हटवली गेली!`);
     } catch (err: any) {
       alert('हटवताना अडचण आली: ' + err.message);
     }
   };
 
-  // Export CSV Handler
   const handleExportCSV = () => {
     let csv = "ID,Month,TotalBill,EnergyCharge,Slab1Rate,Slab2Rate,Slab3Rate,Slab4Rate,Slab5Rate,WheelingRate,DutyPercent,FixedCharge,WheelingCharge,FAC,Duty,NetArrears,MainPrev,MainCurr,MotorPrev,MotorCurr,Son1Prev,Son1Curr,Son2Prev,Son2Curr,Son3Prev,Son3Curr\n";
     
@@ -560,15 +552,7 @@ export default function BillDashboard() {
     a.click();
   };
 
-  // Full Clean & Replace CSV Import Handler
-  const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const shouldClearOld = confirm(
-      "तुम्हाला आधीचा जुना सर्व क्लाउड डाटा पुसून (Clear Old Cloud Data), फक्त या नवीन CSV मधील महिने ठेवायचे आहेत का?\n\n(Click OK to fully replace with CSV entries, or Cancel to merge)"
-    );
-
+  const processCsvFile = async (file: File, shouldWipeOld: boolean) => {
     const reader = new FileReader();
     reader.onload = async (evt) => {
       try {
@@ -576,12 +560,13 @@ export default function BillDashboard() {
         const lines = text.trim().split('\n').filter(l => l.trim().length > 0);
         const dataLines = lines.slice(1);
 
-        // If replace mode, clear all existing Firestore docs first
-        if (shouldClearOld) {
+        if (shouldWipeOld) {
           const oldDocsSnap = await getDocs(collection(db, 'msedcl_bills'));
           const clearPromises = oldDocsSnap.docs.map(d => deleteDoc(d.ref));
           await Promise.all(clearPromises);
         }
+
+        let firstImportedKey = '';
 
         for (const line of dataLines) {
           const v = line.split(',');
@@ -589,6 +574,7 @@ export default function BillDashboard() {
           
           const rawId = v[0] || v[1];
           const normKey = sanitizeMonthKey(rawId);
+          if (!firstImportedKey) firstImportedKey = normKey;
 
           const hasTariff = v.length >= 26;
 
@@ -639,7 +625,10 @@ export default function BillDashboard() {
 
           await setDoc(doc(db, 'msedcl_bills', normKey), importedBill);
         }
-        alert('CSV फाइल मधील सर्व माहिती क्लाउडवर अचूक सेव्ह झाली आहे!');
+
+        if (firstImportedKey) {
+          setSelectedBillId(firstImportedKey);
+        }
       } catch (err: any) {
         alert('CSV फाइल लोड करताना त्रुटी आली: ' + err.message);
       }
@@ -696,45 +685,7 @@ export default function BillDashboard() {
 
   return (
     <>
-      <style jsx global>{`
-        @media print {
-          * {
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-          }
-          @page {
-            size: A4 portrait;
-            margin: 6mm;
-          }
-          body {
-            background-color: #f8fafc !important;
-            color: #0f172a !important;
-            font-size: 13px !important;
-          }
-          .print-hide {
-            display: none !important;
-          }
-          .print-page-break {
-            page-break-before: always !important;
-            break-before: page !important;
-          }
-          .print-card {
-            background-color: #ffffff !important;
-            border: 1px solid #cbd5e1 !important;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
-          }
-          .print-header-text {
-            color: #0f172a !important;
-            font-weight: 800 !important;
-          }
-          .print-sub-text {
-            color: #334155 !important;
-            font-weight: 600 !important;
-          }
-        }
-      `}</style>
-
-      <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans selection:bg-amber-500 selection:text-slate-950">
+      <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
         <div className="max-w-6xl mx-auto space-y-6">
 
           {/* Top Controls */}
@@ -755,11 +706,11 @@ export default function BillDashboard() {
                 className="flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-3 py-2 rounded-xl text-xs transition-colors"
               >
                 <ArrowUpDown className="w-3.5 h-3.5 text-amber-400" />
-                <span>{sortOrder === 'desc' ? 'नवीन ते जुने' : 'जुने ते नवीन'}</span>
+                <span>{sortOrder === 'desc' ? 'नवीन ते जुने (Newest Top)' : 'जुने ते नवीन (Oldest Top)'}</span>
               </button>
 
               <button onClick={handleManualSave} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm transition-all shadow-lg shadow-emerald-600/20">
-                <Save className="w-4 h-4" /> सेव्ह करा
+                <Save className="w-4 h-4" /> सेव्ह करा (Save)
               </button>
 
               <button onClick={handleOpenAddMonthModal} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
@@ -771,11 +722,11 @@ export default function BillDashboard() {
               </button>
 
               <button onClick={() => setIsEditModalOpen(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg shadow-blue-600/20">
-                <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit)
+                <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit Entry)
               </button>
 
               <button 
-                onClick={() => handleDeleteMonth(localBill.id)} 
+                onClick={() => setDeleteCandidateId(localBill.id)} 
                 title="हा महिना हटवा"
                 className="flex items-center gap-1.5 p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/60 transition-colors"
               >
@@ -784,7 +735,7 @@ export default function BillDashboard() {
             </div>
 
             <button onClick={() => window.print()} className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm shadow-lg shadow-indigo-600/20">
-              <Printer className="w-4 h-4" /> Print PDF
+              <Printer className="w-4 h-4" /> Print PDF Report
             </button>
           </div>
 
@@ -795,14 +746,14 @@ export default function BillDashboard() {
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold mb-1.5">
                   <Zap className="w-3.5 h-3.5 fill-amber-400" /> Live Real-Time Collaborative
                 </div>
-                <h1 className="text-2xl md:text-3xl font-extrabold text-white print-header-text tracking-tight">
+                <h1 className="text-2xl md:text-3xl font-extrabold text-white">
                   महावितरण वीज बिल वाटप डॅशबोर्ड
                 </h1>
-                <p className="text-slate-400 print-sub-text text-sm mt-0.5">पारदर्शक, अचूक आणि स्वयंचलित कुटुंब वीज बिल व्यवस्थापन</p>
+                <p className="text-slate-400 text-sm mt-0.5">पारदर्शक, अचूक आणि स्वयंचलित कुटुंब वीज बिल व्यवस्थापन</p>
               </div>
-              <div className="bg-slate-950 print-card px-6 py-3 rounded-xl border border-slate-800 text-center">
-                <span className="text-xs text-slate-400 print-sub-text uppercase tracking-wider block font-semibold">बिलाचा महिना</span>
-                <span className="text-2xl font-black text-amber-400 print:text-indigo-700">{localBill.month}</span>
+              <div className="bg-slate-950 px-6 py-3 rounded-xl border border-slate-800 text-center">
+                <span className="text-xs text-slate-400 uppercase tracking-wider block font-semibold">बिलाचा महिना</span>
+                <span className="text-2xl font-black text-amber-400">{localBill.month}</span>
               </div>
             </div>
           </div>
@@ -812,7 +763,7 @@ export default function BillDashboard() {
             <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-slate-400 flex items-center gap-2 font-semibold">
-                  <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Display Names):
+                  <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Customize Display Names):
                 </p>
                 <button 
                   onClick={() => setIsChangePassModalOpen(true)} 
@@ -830,14 +781,27 @@ export default function BillDashboard() {
 
             <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-xs text-slate-400 font-semibold mb-1">डाटा बॅकअप & CSV इम्पोर्ट</p>
+                <p className="text-xs text-slate-400 font-semibold mb-1">डाटा बॅकअप & PDF अपलोड</p>
                 <div className="flex items-center gap-2">
                   <button onClick={handleExportCSV} className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-emerald-400 transition-colors">
                     <Download className="w-3.5 h-3.5" /> Export CSV
                   </button>
                   <label className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-blue-400 cursor-pointer transition-colors">
                     <Upload className="w-3.5 h-3.5" /> Import CSV
-                    <input type="file" accept=".csv" onChange={handleImportCSV} className="hidden" />
+                    <input 
+                      ref={fileInputRef}
+                      type="file" 
+                      accept=".csv" 
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          setPendingCsvFile(file);
+                          setIsImportConfirmOpen(true);
+                          e.target.value = '';
+                        }
+                      }} 
+                      className="hidden" 
+                    />
                   </label>
                 </div>
               </div>
@@ -851,218 +815,218 @@ export default function BillDashboard() {
 
           {/* Quick Summary Cards */}
           <div className="grid grid-cols-4 gap-4" key={`summary-${localBill.id}`}>
-            <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">एकूण बिल (पूर्णांक देयक)</p>
-              <p className="text-2xl font-black text-emerald-400 print:text-emerald-700 mt-1">₹{actualTotalBill}</p>
+            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+              <p className="text-slate-400 text-xs font-bold">एकूण बिल (पूर्णांक देयक)</p>
+              <p className="text-2xl font-black text-emerald-400 mt-1">₹{actualTotalBill}</p>
             </div>
 
-            <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">ऊर्जा आकार (Energy Charge)</p>
-              <p className="text-2xl font-black text-blue-400 print:text-blue-700 mt-1">₹{calculatedEnergyCharge.toFixed(2)}</p>
+            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+              <p className="text-slate-400 text-xs font-bold">ऊर्जा आकार (Energy Charge)</p>
+              <p className="text-2xl font-black text-blue-400 mt-1">₹{calculatedEnergyCharge.toFixed(2)}</p>
             </div>
 
-            <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">मुख्य वापर (Main Units)</p>
-              <p className="text-2xl font-black text-purple-400 print:text-purple-700 mt-1">{mainUnits} <span className="text-xs font-bold text-slate-400">U</span></p>
+            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+              <p className="text-slate-400 text-xs font-bold">मुख्य वापर (Main Units)</p>
+              <p className="text-2xl font-black text-purple-400 mt-1">{mainUnits} <span className="text-xs font-bold text-slate-400">U</span></p>
             </div>
 
-            <div className="bg-slate-900 print-card p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 print-sub-text text-xs font-bold">प्रभावी दर (Avg Rate/Unit)</p>
-              <p className="text-2xl font-black text-amber-400 print:text-amber-700 mt-1">₹{energyRate.toFixed(2)}</p>
+            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+              <p className="text-slate-400 text-xs font-bold">प्रभावी दर (Avg Rate/Unit)</p>
+              <p className="text-2xl font-black text-amber-400 mt-1">₹{energyRate.toFixed(2)}</p>
             </div>
           </div>
 
           {/* SECTION 1: Fixed Charges Breakup */}
-          <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
-            <h3 className="text-sm font-extrabold text-amber-400 print-header-text flex items-center gap-2">
+          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
+            <h3 className="text-sm font-extrabold text-amber-400 flex items-center gap-2">
               <ShieldAlert className="text-purple-400 w-4 h-4 print-hide" /> स्थिर आकारांचा तपशील (Fixed Charges Breakup)
             </h3>
             <div className="grid grid-cols-5 gap-3 text-xs text-slate-300">
-              <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">स्थिर आकार</p>
-                <input type="number" value={localBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                <p className="text-slate-400 font-semibold">स्थिर आकार</p>
+                <input type="number" value={localBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-white font-bold mt-1 outline-none" />
               </div>
-              <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">वहन आकार</p>
-                <input type="number" disabled value={computedWheelingCharge} className="w-full bg-slate-900/60 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-blue-400 print-header-text font-bold mt-1 outline-none cursor-not-allowed" />
+              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                <p className="text-slate-400 font-semibold">वहन आकार</p>
+                <input type="number" disabled value={computedWheelingCharge} className="w-full bg-slate-900/60 border border-slate-800 rounded px-1.5 py-0.5 text-blue-400 font-bold mt-1 outline-none cursor-not-allowed" />
               </div>
-              <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">इंधन आकार</p>
-                <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-white print-header-text font-bold mt-1 outline-none" />
+              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                <p className="text-slate-400 font-semibold">इंधन आकार</p>
+                <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-white font-bold mt-1 outline-none" />
               </div>
-              <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold">वीज शुल्क</p>
-                <input type="number" disabled value={computedDuty} className="w-full bg-slate-900/60 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-purple-400 print-header-text font-bold mt-1 outline-none cursor-not-allowed" />
+              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                <p className="text-slate-400 font-semibold">वीज शुल्क</p>
+                <input type="number" disabled value={computedDuty} className="w-full bg-slate-900/60 border border-slate-800 rounded px-1.5 py-0.5 text-purple-400 font-bold mt-1 outline-none cursor-not-allowed" />
               </div>
-              <div className="bg-slate-950 print-card p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 print-sub-text font-semibold text-emerald-400">निव्वळ थकबाकी/जमा</p>
-                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-1.5 py-0.5 text-emerald-400 print-header-text font-bold mt-1 outline-none" />
+              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+                <p className="text-slate-400 font-semibold text-emerald-400">निव्वळ थकबाकी/जमा</p>
+                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-emerald-400 font-bold mt-1 outline-none" />
               </div>
             </div>
-            <p className="text-xs text-slate-400 print-sub-text pt-1">
-              एकूण स्थिर पूल: <strong className="text-amber-400 print:text-amber-700">₹{totalBundledFixed.toFixed(2)}</strong> (प्रत्येक मुलाचा १/३ हिस्सा: <strong className="text-emerald-400 print:text-emerald-700">₹{fixedSharePerSon.toFixed(2)}</strong>)
+            <p className="text-xs text-slate-400 pt-1">
+              एकूण स्थिर पूल: <strong className="text-amber-400">₹{totalBundledFixed.toFixed(2)}</strong> (प्रत्येक मुलाचा १/३ हिस्सा: <strong className="text-emerald-400">₹{fixedSharePerSon.toFixed(2)}</strong>)
             </p>
           </div>
 
           {/* SECTION 2: Meter Readings */}
-          <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3" key={`readings-${localBill.id}`}>
-            <h3 className="text-sm font-extrabold text-amber-400 print-header-text flex items-center gap-2">
+          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3" key={`readings-${localBill.id}`}>
+            <h3 className="text-sm font-extrabold text-amber-400 flex items-center gap-2">
               <Activity className="w-4 h-4 print-hide" /> मीटर रीडिंग नोंदवा ({localBill.month})
             </h3>
             <div className="grid grid-cols-5 gap-3 text-xs">
 
-              <div className="bg-slate-950 print-card p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-amber-400 print:text-amber-700 text-xs">मुख्य मीटर (Main)</p>
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+                <p className="font-bold text-amber-400 text-xs">मुख्य मीटर (Main)</p>
                 <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.mainPrev} onChange={(e) => updateActiveField(['readings', 'mainPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                  <input type="number" value={localBill.readings.mainPrev} onChange={(e) => updateActiveField(['readings', 'mainPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
                 </div>
                 <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950 print-card p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-blue-400 print:text-blue-700 text-xs">मोटार (Motor)</p>
-                <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.motorPrev} onChange={(e) => updateActiveField(['readings', 'motorPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                  <input type="number" value={localBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
                 </div>
               </div>
 
-              <div className="bg-slate-950 print-card p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-slate-200 print-header-text text-xs">{son1Name}</p>
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+                <p className="font-bold text-blue-400 text-xs">मोटार (Motor)</p>
                 <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                  <input type="number" value={localBill.readings.motorPrev} onChange={(e) => updateActiveField(['readings', 'motorPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
                 </div>
                 <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950 print-card p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-slate-200 print-header-text text-xs">{son2Name}</p>
-                <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                  <input type="number" value={localBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
                 </div>
               </div>
 
-              <div className="bg-slate-950 print-card p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-slate-200 print-header-text text-xs">{son3Name}</p>
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+                <p className="font-bold text-slate-200 text-xs">{son1Name}</p>
                 <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                  <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
                 </div>
                 <div>
-                  <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                  <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                </div>
+              </div>
+
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+                <p className="font-bold text-slate-200 text-xs">{son2Name}</p>
+                <div>
+                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                  <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                </div>
+                <div>
+                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                  <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                </div>
+              </div>
+
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+                <p className="font-bold text-slate-200 text-xs">{son3Name}</p>
+                <div>
+                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                  <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                </div>
+                <div>
+                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                  <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
                 </div>
               </div>
 
             </div>
           </div>
 
-          {/* SECTION 3: Member Payables */}
+          {/* SECTION 3: Individual Payables */}
           <div className="space-y-3">
-            <div className="inline-block bg-amber-500/10 print:bg-amber-100 border border-amber-500/30 print:border-amber-300 px-3 py-1 rounded-lg">
-              <h2 className="text-lg font-extrabold text-amber-400 print:text-amber-800 flex items-center gap-2">
-                <User className="text-amber-400 print:text-amber-800 w-5 h-5 print-hide" /> प्रत्येक सदस्याची देय रक्कम (Individual Payable)
+            <div className="inline-block bg-amber-500/10 border border-amber-500/30 px-3 py-1 rounded-lg">
+              <h2 className="text-lg font-extrabold text-amber-400 flex items-center gap-2">
+                <User className="text-amber-400 w-5 h-5 print-hide" /> प्रत्येक सदस्याची देय रक्कम (Individual Payable)
               </h2>
             </div>
 
             <div className="grid grid-cols-4 gap-4">
 
               {/* Parents */}
-              <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
                 <div>
-                  <p className="font-extrabold text-base text-slate-200 print-header-text">आई - बाबा (Parents)</p>
-                  <p className="text-xs text-emerald-400 print:text-emerald-700 font-bold mt-0.5">१००% सवलत</p>
-                  <div className="mt-3 text-xs text-slate-400 print-sub-text space-y-1">
-                    <p>वापर: <strong className="text-slate-200 print-header-text">{parentsUnits} Units</strong></p>
-                    <p>खर्च: <strong className="text-slate-200 print-header-text">₹{totalParentsCost.toFixed(2)}</strong></p>
+                  <p className="font-extrabold text-base text-slate-200">आई - बाबा (Parents)</p>
+                  <p className="text-xs text-emerald-400 font-bold mt-0.5">१००% सवलत</p>
+                  <div className="mt-3 text-xs text-slate-400 space-y-1">
+                    <p>वापर: <strong className="text-slate-200">{parentsUnits} Units</strong></p>
+                    <p>खर्च: <strong className="text-slate-200">₹{totalParentsCost.toFixed(2)}</strong></p>
                   </div>
                 </div>
-                <div className="mt-4 pt-3 border-t border-slate-800 print:border-slate-300">
-                  <p className="text-xs text-slate-400 print-sub-text font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-emerald-400 print:text-emerald-700">₹0.00</p>
+                <div className="mt-4 pt-3 border-t border-slate-800">
+                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                  <p className="text-2xl font-black text-emerald-400">₹0.00</p>
                 </div>
               </div>
 
               {/* Son 1 */}
-              <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="font-extrabold text-base text-slate-100 print-header-text">{son1Name}</span>
+                    <span className="font-extrabold text-base text-slate-100">{son1Name}</span>
                     <button onClick={() => shareWhatsApp(son1Name, son1Total, son1Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
                       <Share2 className="w-4 h-4" />
                     </button>
                   </div>
-                  <div className="text-xs space-y-1 text-slate-400 print-sub-text">
-                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200 print-header-text">₹{fixedSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200 print-header-text">₹{waterSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200 print-header-text">₹{parentsSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• स्वतः ({son1Units} U):</span> <strong className="text-slate-200 print-header-text">₹{son1Direct.toFixed(2)}</strong></p>
+                  <div className="text-xs space-y-1 text-slate-400">
+                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• स्वतः ({son1Units} U):</span> <strong className="text-slate-200">₹{son1Direct.toFixed(2)}</strong></p>
                   </div>
                 </div>
-                <div className="mt-4 pt-3 border-t border-slate-800 print:border-slate-300">
-                  <p className="text-xs text-slate-400 print-sub-text font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-amber-400 print:text-amber-700">₹{son1Total.toFixed(2)}</p>
+                <div className="mt-4 pt-3 border-t border-slate-800">
+                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                  <p className="text-2xl font-black text-amber-400">₹{son1Total.toFixed(2)}</p>
                 </div>
               </div>
 
               {/* Son 2 */}
-              <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="font-extrabold text-base text-slate-100 print-header-text">{son2Name}</span>
+                    <span className="font-extrabold text-base text-slate-100">{son2Name}</span>
                     <button onClick={() => shareWhatsApp(son2Name, son2Total, son2Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
                       <Share2 className="w-4 h-4" />
                     </button>
                   </div>
-                  <div className="text-xs space-y-1 text-slate-400 print-sub-text">
-                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200 print-header-text">₹{fixedSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200 print-header-text">₹{waterSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200 print-header-text">₹{parentsSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• स्वतः ({son2Units} U):</span> <strong className="text-slate-200 print-header-text">₹{son2Direct.toFixed(2)}</strong></p>
+                  <div className="text-xs space-y-1 text-slate-400">
+                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• स्वतः ({son2Units} U):</span> <strong className="text-slate-200">₹{son2Direct.toFixed(2)}</strong></p>
                   </div>
                 </div>
-                <div className="mt-4 pt-3 border-t border-slate-800 print:border-slate-300">
-                  <p className="text-xs text-slate-400 print-sub-text font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-amber-400 print:text-amber-700">₹{son2Total.toFixed(2)}</p>
+                <div className="mt-4 pt-3 border-t border-slate-800">
+                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                  <p className="text-2xl font-black text-amber-400">₹{son2Total.toFixed(2)}</p>
                 </div>
               </div>
 
               {/* Son 3 */}
-              <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="font-extrabold text-base text-slate-100 print-header-text">{son3Name}</span>
+                    <span className="font-extrabold text-base text-slate-100">{son3Name}</span>
                     <button onClick={() => shareWhatsApp(son3Name, son3Total, son3Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
                       <Share2 className="w-4 h-4" />
                     </button>
                   </div>
-                  <div className="text-xs space-y-1 text-slate-400 print-sub-text">
-                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200 print-header-text">₹{fixedSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200 print-header-text">₹{waterSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200 print-header-text">₹{parentsSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• स्वतः ({son3Units} U):</span> <strong className="text-slate-200 print-header-text">₹{son3Direct.toFixed(2)}</strong></p>
+                  <div className="text-xs space-y-1 text-slate-400">
+                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
+                    <p className="flex justify-between"><span>• स्वतः ({son3Units} U):</span> <strong className="text-slate-200">₹{son3Direct.toFixed(2)}</strong></p>
                   </div>
                 </div>
-                <div className="mt-4 pt-3 border-t border-slate-800 print:border-slate-300">
-                  <p className="text-xs text-slate-400 print-sub-text font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-amber-400 print:text-amber-700">₹{son3Total.toFixed(2)}</p>
+                <div className="mt-4 pt-3 border-t border-slate-800">
+                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                  <p className="text-2xl font-black text-amber-400">₹{son3Total.toFixed(2)}</p>
                 </div>
               </div>
 
@@ -1070,102 +1034,98 @@ export default function BillDashboard() {
           </div>
 
           {/* PAGE 2 / Charts */}
-          <div className="print-page-break grid grid-cols-2 gap-4">
-
-            {/* Chart 1: Financial Split */}
-            <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-4">
-              <h3 className="text-sm font-bold text-slate-100 print-header-text flex items-center gap-2">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-4">
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                 <PieChart className="text-amber-400 w-4 h-4 print-hide" /> १. बिल आकार आलेख (Bill Split)
               </h3>
               <div className="space-y-3">
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>{son1Name}</span>
-                    <span className="font-black text-amber-400 print:text-amber-700">₹{son1Total.toFixed(2)}</span>
+                    <span className="font-black text-amber-400">₹{son1Total.toFixed(2)}</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-3 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-amber-400 print:bg-amber-500 h-3 rounded-full" style={{ width: `${Math.max(8, (son1Total / maxCost) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
+                    <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son1Total / maxCost) * 100)}%` }}></div>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>{son2Name}</span>
-                    <span className="font-black text-amber-400 print:text-amber-700">₹{son2Total.toFixed(2)}</span>
+                    <span className="font-black text-amber-400">₹{son2Total.toFixed(2)}</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-3 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-amber-400 print:bg-amber-500 h-3 rounded-full" style={{ width: `${Math.max(8, (son2Total / maxCost) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
+                    <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son2Total / maxCost) * 100)}%` }}></div>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>{son3Name}</span>
-                    <span className="font-black text-amber-400 print:text-amber-700">₹{son3Total.toFixed(2)}</span>
+                    <span className="font-black text-amber-400">₹{son3Total.toFixed(2)}</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-3 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-amber-400 print:bg-amber-500 h-3 rounded-full" style={{ width: `${Math.max(8, (son3Total / maxCost) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
+                    <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son3Total / maxCost) * 100)}%` }}></div>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Chart 2: Unit Usage */}
-            <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-4">
-              <h3 className="text-sm font-bold text-slate-100 print-header-text flex items-center gap-2">
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-4">
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                 <BarChart2 className="text-blue-400 w-4 h-4 print-hide" /> २. युनिट्स वापर आलेख (Units)
               </h3>
               <div className="space-y-2.5">
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>{son1Name}</span>
-                    <span className="font-black text-blue-400 print:text-blue-700">{son1Units} U</span>
+                    <span className="font-black text-blue-400">{son1Units} U</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-blue-500 print:bg-blue-600 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son1Units / maxUnits) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                    <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son1Units / maxUnits) * 100)}%` }}></div>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>{son2Name}</span>
-                    <span className="font-black text-blue-400 print:text-blue-700">{son2Units} U</span>
+                    <span className="font-black text-blue-400">{son2Units} U</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-blue-500 print:bg-blue-600 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son2Units / maxUnits) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                    <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son2Units / maxUnits) * 100)}%` }}></div>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>{son3Name}</span>
-                    <span className="font-black text-blue-400 print:text-blue-700">{son3Units} U</span>
+                    <span className="font-black text-blue-400">{son3Units} U</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-blue-500 print:bg-blue-600 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son3Units / maxUnits) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                    <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son3Units / maxUnits) * 100)}%` }}></div>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between text-xs text-slate-300 print-header-text mb-1 font-bold">
+                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
                     <span>पालक वापर</span>
-                    <span className="font-black text-emerald-400 print:text-emerald-700">{parentsUnits} U</span>
+                    <span className="font-black text-emerald-400">{parentsUnits} U</span>
                   </div>
-                  <div className="w-full bg-slate-950 print:bg-slate-200 rounded-full h-2.5 overflow-hidden border border-slate-800 print:border-slate-300">
-                    <div className="bg-emerald-500 print:bg-emerald-600 h-2.5 rounded-full" style={{ width: `${Math.max(8, (parentsUnits / maxUnits) * 100)}%` }}></div>
+                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                    <div className="bg-emerald-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (parentsUnits / maxUnits) * 100)}%` }}></div>
                   </div>
                 </div>
               </div>
             </div>
-
           </div>
 
-          {/* Vertical Trend Bar Graph */}
-          <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
-            <h3 className="text-sm font-bold text-slate-100 print-header-text flex items-center gap-2">
+          {/* Trend Bar Graph */}
+          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
               <TrendingUp className="text-purple-400 w-4 h-4 print-hide" /> ३. मासिक वापर ट्रेंड (Month-over-Month Trend)
             </h3>
-            <div className="flex items-end justify-around gap-4 h-44 pt-6 pb-2 border-b border-slate-800 print:border-slate-300 overflow-x-auto">
+            <div className="flex items-end justify-around gap-4 h-44 pt-6 pb-2 border-b border-slate-800 overflow-x-auto">
               {[...sortedBills].reverse().map((b) => {
                 const u = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
                 const heightPct = Math.max(20, (u / maxHistoricalUnits) * 100);
@@ -1173,14 +1133,14 @@ export default function BillDashboard() {
 
                 return (
                   <div key={b.id} className="flex-1 min-w-[50px] max-w-[80px] flex flex-col items-center gap-1.5 h-full justify-end">
-                    <span className="text-xs font-black text-purple-300 print:text-purple-700">{u}U</span>
-                    <div className="w-full bg-slate-950 print:bg-slate-200 rounded-t-lg h-full flex items-end p-1 border border-slate-800 print:border-slate-300">
+                    <span className="text-xs font-black text-purple-300">{u}U</span>
+                    <div className="w-full bg-slate-950 rounded-t-lg h-full flex items-end p-1 border border-slate-800">
                       <div 
-                        className={`w-full rounded-t-md ${isSelected ? 'bg-indigo-500 print:bg-indigo-600' : 'bg-slate-700 print:bg-slate-400'}`} 
+                        className={`w-full rounded-t-md ${isSelected ? 'bg-indigo-500' : 'bg-slate-700'}`} 
                         style={{ height: `${heightPct}%` }}
                       ></div>
                     </div>
-                    <span className={`text-xs font-bold ${isSelected ? 'text-amber-400 print:text-amber-700' : 'text-slate-400 print-sub-text'}`}>{b.month}</span>
+                    <span className={`text-xs font-bold ${isSelected ? 'text-amber-400' : 'text-slate-400'}`}>{b.month}</span>
                   </div>
                 );
               })}
@@ -1188,20 +1148,20 @@ export default function BillDashboard() {
           </div>
 
           {/* Shared Pools Breakdown */}
-          <div className="bg-slate-900 print-card p-5 rounded-2xl border border-slate-800 space-y-3">
-            <h3 className="text-sm font-bold text-slate-100 print-header-text flex items-center gap-2">
+          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
               <Droplet className="text-blue-400 w-4 h-4 print-hide" /> सामायिक वापर (Shared Pools Breakdown)
             </h3>
             <div className="grid grid-cols-2 gap-4 text-xs text-slate-300">
-              <div className="bg-slate-950 print-card p-4 rounded-xl border border-slate-800">
-                <p className="font-bold text-blue-400 print:text-blue-700 text-sm">🚰 पाण्याच्या मोटार सबमीटर</p>
-                <p className="mt-1 text-xs print-header-text">एकूण वापर: <strong>{motorUnits} Units</strong> (₹{totalWaterCost.toFixed(2)})</p>
-                <p className="text-xs text-slate-400 print-sub-text mt-1.5">१/३ भाग: <strong className="text-emerald-400 print:text-emerald-700">₹{waterSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                <p className="font-bold text-blue-400 text-sm">🚰 पाण्याच्या मोटार सबमीटर</p>
+                <p className="mt-1 text-xs">एकूण वापर: <strong>{motorUnits} Units</strong> (₹{totalWaterCost.toFixed(2)})</p>
+                <p className="text-xs text-slate-400 mt-1.5">१/३ भाग: <strong className="text-emerald-400">₹{waterSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
               </div>
-              <div className="bg-slate-950 print-card p-4 rounded-xl border border-slate-800">
-                <p className="font-bold text-amber-400 print:text-amber-700 text-sm">👴 पालकांचा वैयक्तिक वापर</p>
-                <p className="mt-1 text-xs print-header-text">एकूण वापर: <strong>{parentsUnits} Units</strong> (₹{totalParentsCost.toFixed(2)})</p>
-                <p className="text-xs text-slate-400 print-sub-text mt-1.5">१/३ भाग: <strong className="text-emerald-400 print:text-emerald-700">₹{parentsSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                <p className="font-bold text-amber-400 text-sm">👴 पालकांचा वैयक्तिक वापर</p>
+                <p className="mt-1 text-xs">एकूण वापर: <strong>{parentsUnits} Units</strong> (₹{totalParentsCost.toFixed(2)})</p>
+                <p className="text-xs text-slate-400 mt-1.5">१/३ भाग: <strong className="text-emerald-400">₹{parentsSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
               </div>
             </div>
           </div>
@@ -1209,7 +1169,80 @@ export default function BillDashboard() {
         </div>
       </main>
 
-      {/* ALL TARIFF & RATE SETTINGS UNDER ONE MODAL */}
+      {/* CSV IMPORT DIALOG */}
+      {isImportConfirmOpen && pendingCsvFile && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-md w-full space-y-4 shadow-2xl">
+            <h3 className="text-base font-extrabold text-amber-400 flex items-center gap-2">
+              <Upload className="w-5 h-5" /> CSV डेटा इम्पोर्ट पर्याय निवडा
+            </h3>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              तुम्हाला आधीचा जुना डेटा पूर्णपणे पुसून (Clear Old Cloud Data) फक्त या नवीन CSV मधील महिने ठेवायचे आहेत की दोन्ही महिने एकत्र (Merge) करायचे आहेत?
+            </p>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={() => {
+                  processCsvFile(pendingCsvFile, true);
+                  setIsImportConfirmOpen(false);
+                  setPendingCsvFile(null);
+                }}
+                className="w-full bg-rose-600 hover:bg-rose-500 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-rose-600/20"
+              >
+                जुना डाटा पुसून नवा लोड करा (Wipe & Replace)
+              </button>
+              <button
+                onClick={() => {
+                  processCsvFile(pendingCsvFile, false);
+                  setIsImportConfirmOpen(false);
+                  setPendingCsvFile(null);
+                }}
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/20"
+              >
+                जुना ठेवा व नवा जोडा (Merge Entries)
+              </button>
+              <button
+                onClick={() => {
+                  setIsImportConfirmOpen(false);
+                  setPendingCsvFile(null);
+                }}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2 rounded-xl text-xs mt-1"
+              >
+                रद्द करा (Cancel)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRM DELETE MODAL */}
+      {deleteCandidateId && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-sm w-full space-y-4 shadow-2xl">
+            <h3 className="text-base font-extrabold text-rose-400 flex items-center gap-2">
+              <Trash2 className="w-5 h-5" /> महिना कायमचा हटवायचा का?
+            </h3>
+            <p className="text-xs text-slate-300">
+              तुम्हाला खात्री आहे का की <strong className="text-amber-400">"{deleteCandidateId}"</strong> बिल नोंद क्लाउडवरून कायमची हटवायची आहे?
+            </p>
+            <div className="pt-2 flex justify-end gap-2">
+              <button 
+                onClick={() => setDeleteCandidateId(null)} 
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
+              >
+                रद्द करा
+              </button>
+              <button 
+                onClick={executeDeleteMonth}
+                className="bg-rose-600 hover:bg-rose-500 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> होय, हटवा (Delete)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TARIFF MODAL */}
       {isTariffModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
@@ -1217,13 +1250,7 @@ export default function BillDashboard() {
               <h3 className="text-lg font-bold text-purple-400 flex items-center gap-2">
                 <Settings className="w-5 h-5" /> दर व नियम (MSEDCL Tariff & Rate Settings)
               </h3>
-              <button 
-                type="button" 
-                onClick={handleCancelEdit}
-                className="text-slate-400 hover:text-white text-sm font-bold"
-              >
-                ✕
-              </button>
+              <button type="button" onClick={handleCancelEdit} className="text-slate-400 hover:text-white text-sm font-bold">✕</button>
             </div>
 
             <div className="space-y-4 text-xs">
@@ -1235,98 +1262,41 @@ export default function BillDashboard() {
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <div>
                   <label className="text-slate-400 block mb-1">0 - 100 Units (₹)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={currentTariff.slab1} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'slab1'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" 
-                  />
+                  <input type="number" step="0.01" value={currentTariff.slab1} onChange={(e) => updateActiveField(['tariffConfig', 'slab1'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" />
                 </div>
-
                 <div>
                   <label className="text-slate-400 block mb-1">101 - 300 Units (₹)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={currentTariff.slab2} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'slab2'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" 
-                  />
+                  <input type="number" step="0.01" value={currentTariff.slab2} onChange={(e) => updateActiveField(['tariffConfig', 'slab2'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" />
                 </div>
-
                 <div>
                   <label className="text-slate-400 block mb-1">301 - 500 Units (₹)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={currentTariff.slab3} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'slab3'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" 
-                  />
+                  <input type="number" step="0.01" value={currentTariff.slab3} onChange={(e) => updateActiveField(['tariffConfig', 'slab3'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" />
                 </div>
-
                 <div>
                   <label className="text-slate-400 block mb-1">501 - 1000 Units (₹)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={currentTariff.slab4} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'slab4'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" 
-                  />
+                  <input type="number" step="0.01" value={currentTariff.slab4} onChange={(e) => updateActiveField(['tariffConfig', 'slab4'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" />
                 </div>
-
                 <div>
                   <label className="text-slate-400 block mb-1">1000+ Units (₹)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={currentTariff.slab5} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'slab5'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" 
-                  />
+                  <input type="number" step="0.01" value={currentTariff.slab5} onChange={(e) => updateActiveField(['tariffConfig', 'slab5'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-purple-500" />
                 </div>
               </div>
 
               <div className="pt-2 border-t border-slate-800 grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-amber-400 block mb-1 font-bold">वहन आकार दर (Wheeling Charge ₹/Unit)</label>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={currentTariff.wheelingRate} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'wheelingRate'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none focus:border-amber-500" 
-                  />
+                  <input type="number" step="0.01" value={currentTariff.wheelingRate} onChange={(e) => updateActiveField(['tariffConfig', 'wheelingRate'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none focus:border-amber-500" />
                 </div>
-
                 <div>
                   <label className="text-amber-400 block mb-1 font-bold">वीज शुल्क टक्केवारी (Electricity Duty %)</label>
-                  <input 
-                    type="number" 
-                    step="0.1"
-                    value={currentTariff.dutyPercent} 
-                    onChange={(e) => updateActiveField(['tariffConfig', 'dutyPercent'], parseFloat(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none focus:border-amber-500" 
-                  />
+                  <input type="number" step="0.1" value={currentTariff.dutyPercent} onChange={(e) => updateActiveField(['tariffConfig', 'dutyPercent'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-amber-500/50 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none focus:border-amber-500" />
                 </div>
               </div>
             </div>
 
             <div className="pt-4 flex justify-end gap-2 border-t border-slate-800">
-              <button 
-                type="button" 
-                onClick={handleCancelEdit} 
-                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-sm"
-              >
-                रद्द करा (Cancel)
-              </button>
-              <button 
-                type="button" 
-                onClick={handleManualSave} 
-                className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5"
-              >
+              <button type="button" onClick={handleCancelEdit} className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-sm">रद्द करा (Cancel)</button>
+              <button type="button" onClick={handleManualSave} className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5">
                 <Check className="w-4 h-4" /> दर लागू करा & सेव्ह करा
               </button>
             </div>
@@ -1342,39 +1312,21 @@ export default function BillDashboard() {
               <h3 className="text-base font-bold text-amber-400 flex items-center gap-2">
                 <PlusCircle className="w-5 h-5" /> नवीन महिना जोडा
               </h3>
-              <button 
-                type="button" 
-                onClick={() => setIsAddMonthModalOpen(false)}
-                className="text-slate-400 hover:text-white text-sm font-bold"
-              >
-                ✕
-              </button>
+              <button type="button" onClick={() => setIsAddMonthModalOpen(false)} className="text-slate-400 hover:text-white text-sm font-bold">✕</button>
             </div>
 
             <div className="space-y-3 text-xs">
               <div>
                 <label className="text-slate-300 block mb-1 font-semibold">महिना निवडा (Select Month)</label>
-                <select
-                  value={selectedMonth}
-                  onChange={(e) => setSelectedMonth(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none"
-                >
-                  {monthNames.map(m => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
+                <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none">
+                  {monthNames.map(m => (<option key={m} value={m}>{m}</option>))}
                 </select>
               </div>
 
               <div>
                 <label className="text-slate-300 block mb-1 font-semibold">वर्ष निवडा (Select Year)</label>
-                <select
-                  value={selectedYear}
-                  onChange={(e) => setSelectedYear(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none"
-                >
-                  {availableYears.map(y => (
-                    <option key={y} value={y}>{y}</option>
-                  ))}
+                <select value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-amber-400 font-bold outline-none">
+                  {availableYears.map(y => (<option key={y} value={y}>{y}</option>))}
                 </select>
               </div>
 
@@ -1391,23 +1343,8 @@ export default function BillDashboard() {
             </div>
 
             <div className="pt-2 flex justify-end gap-2">
-              <button 
-                type="button" 
-                onClick={() => setIsAddMonthModalOpen(false)} 
-                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
-              >
-                रद्द करा
-              </button>
-              <button 
-                type="button" 
-                disabled={isMonthDuplicate}
-                onClick={handleConfirmAddMonth}
-                className={`font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1 transition-all ${
-                  isMonthDuplicate 
-                    ? 'bg-slate-800 text-slate-600 cursor-not-allowed' 
-                    : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
-                }`}
-              >
+              <button type="button" onClick={() => setIsAddMonthModalOpen(false)} className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs">रद्द करा</button>
+              <button type="button" disabled={isMonthDuplicate} onClick={handleConfirmAddMonth} className={`font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1 transition-all ${isMonthDuplicate ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-400 text-slate-950'}`}>
                 <Check className="w-3.5 h-3.5" /> महिना जोडा
               </button>
             </div>
@@ -1423,60 +1360,27 @@ export default function BillDashboard() {
               <h3 className="text-base font-bold text-amber-400 flex items-center gap-2">
                 <Key className="w-5 h-5" /> पासवर्ड बदला
               </h3>
-              <button 
-                type="button" 
-                onClick={() => setIsChangePassModalOpen(false)}
-                className="text-slate-400 hover:text-white text-sm font-bold"
-              >
-                ✕
-              </button>
+              <button type="button" onClick={() => setIsChangePassModalOpen(false)} className="text-slate-400 hover:text-white text-sm font-bold">✕</button>
             </div>
 
             <div className="space-y-3 text-xs">
               <div>
                 <label className="text-slate-300 block mb-1">नवीन पासवर्ड (New Password)</label>
-                <input 
-                  type="password" 
-                  value={newPass}
-                  onChange={(e) => setNewPass(e.target.value)}
-                  placeholder="नवीन पासवर्ड लिहा"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500"
-                  autoFocus
-                />
+                <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} placeholder="नवीन पासवर्ड लिहा" className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500" autoFocus />
               </div>
 
               <div>
                 <label className="text-slate-300 block mb-1">पासवर्ड पुन्हा टाका (Confirm Password)</label>
-                <input 
-                  type="password" 
-                  value={confirmPass}
-                  onChange={(e) => setConfirmPass(e.target.value)}
-                  placeholder="पुन्हा तोच पासवर्ड टाका"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500"
-                />
+                <input type="password" value={confirmPass} onChange={(e) => setConfirmPass(e.target.value)} placeholder="पुन्हा तोच पासवर्ड टाका" className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500" />
               </div>
 
-              {passChangeError && (
-                <p className="text-rose-400 text-center font-semibold text-[11px]">{passChangeError}</p>
-              )}
-
-              {passChangeSuccess && (
-                <p className="text-emerald-400 text-center font-semibold text-[11px]">पासवर्ड यशस्वीरित्या बदलला! (Success)</p>
-              )}
+              {passChangeError && <p className="text-rose-400 text-center font-semibold text-[11px]">{passChangeError}</p>}
+              {passChangeSuccess && <p className="text-emerald-400 text-center font-semibold text-[11px]">पासवर्ड यशस्वीरित्या बदलला! (Success)</p>}
             </div>
 
             <div className="pt-2 flex justify-end gap-2">
-              <button 
-                type="button" 
-                onClick={() => setIsChangePassModalOpen(false)} 
-                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
-              >
-                रद्द करा
-              </button>
-              <button 
-                type="submit" 
-                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1"
-              >
+              <button type="button" onClick={() => setIsChangePassModalOpen(false)} className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs">रद्द करा</button>
+              <button type="submit" className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1">
                 <Check className="w-3.5 h-3.5" /> सेव्ह करा
               </button>
             </div>
@@ -1484,7 +1388,7 @@ export default function BillDashboard() {
         </div>
       )}
 
-      {/* EDIT/CORRECTION MODAL */}
+      {/* EDIT MODAL */}
       {isEditModalOpen && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
@@ -1492,33 +1396,17 @@ export default function BillDashboard() {
               <h3 className="text-lg font-bold text-amber-400 flex items-center gap-2">
                 <Edit3 className="w-5 h-5" /> बिलात दुरुस्ती करा ({localBill.month})
               </h3>
-              <button 
-                type="button" 
-                onClick={handleCancelEdit}
-                className="text-slate-400 hover:text-white text-sm font-bold"
-              >
-                ✕
-              </button>
+              <button type="button" onClick={handleCancelEdit} className="text-slate-400 hover:text-white text-sm font-bold">✕</button>
             </div>
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
                 <label className="text-slate-400 block mb-1">एकूण बिल (पूर्णांक देयक ₹ - Locked)</label>
-                <input 
-                  type="number" 
-                  disabled
-                  value={actualTotalBill} 
-                  className="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-emerald-400 font-extrabold outline-none cursor-not-allowed" 
-                />
+                <input type="number" disabled value={actualTotalBill} className="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-emerald-400 font-extrabold outline-none cursor-not-allowed" />
               </div>
               <div>
                 <label className="text-slate-400 block mb-1">ऊर्जा आकार (Energy Charge ₹ - Calculated)</label>
-                <input 
-                  type="number" 
-                  disabled
-                  value={calculatedEnergyCharge.toFixed(2)} 
-                  className="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-blue-400 font-extrabold outline-none cursor-not-allowed" 
-                />
+                <input type="number" disabled value={calculatedEnergyCharge.toFixed(2)} className="w-full bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2 text-blue-400 font-extrabold outline-none cursor-not-allowed" />
               </div>
             </div>
 
@@ -1571,18 +1459,8 @@ export default function BillDashboard() {
             </div>
 
             <div className="pt-4 flex justify-end gap-2 border-t border-slate-800">
-              <button 
-                type="button" 
-                onClick={handleCancelEdit} 
-                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-sm"
-              >
-                रद्द करा (Cancel)
-              </button>
-              <button 
-                type="button" 
-                onClick={handleManualSave} 
-                className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5"
-              >
+              <button type="button" onClick={handleCancelEdit} className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-sm">रद्द करा (Cancel)</button>
+              <button type="button" onClick={handleManualSave} className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-5 py-2 rounded-xl text-sm flex items-center gap-1.5">
                 <Check className="w-4 h-4" /> सेव्ह करा (Save)
               </button>
             </div>
