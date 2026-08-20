@@ -22,8 +22,8 @@ interface TariffConfig {
 }
 
 interface BillData {
-  id: string;
-  month: string;
+  id: string; // Stored as "YYYY-MM" (e.g., "2026-07")
+  month: string; // Displayed as "Jul-2026"
   rawDocId?: string;
   totalBill: number;
   energyCharge: number;
@@ -54,8 +54,60 @@ const defaultTariffConfig: TariffConfig = {
   dutyPercent: 16.0
 };
 
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const availableYears = ["2024", "2025", "2026", "2027", "2028", "2029", "2030"];
+
+const monthToNumberMap: Record<string, string> = {
+  jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+  jul: '07', aug: '08', sep: '09', sept: '09', oct: '10', nov: '11', dec: '12'
+};
+
+const numberToMonthMap: Record<string, string> = {
+  '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr', '05': 'May', '06': 'Jun',
+  '07': 'Jul', '08': 'Aug', '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec'
+};
+
+// Converts any key ("Jul-2026", "Jul-26", "2026-07") to standardized Firestore ID "YYYY-MM"
+const toIsoDocId = (key: string): string => {
+  if (!key) return '2026-07';
+  const clean = key.trim().replace(/\s+/g, '');
+  if (!clean.includes('-')) return clean;
+
+  const parts = clean.split('-');
+  if (parts[0].length === 4 && !isNaN(Number(parts[0]))) {
+    return `${parts[0]}-${parts[1].padStart(2, '0')}`;
+  }
+
+  let m = parts[0].toLowerCase();
+  let y = parts[1];
+  if (y.length === 2) y = `20${y}`;
+  const mNum = monthToNumberMap[m] || '01';
+  return `${y}-${mNum}`;
+};
+
+// Converts "YYYY-MM" to readable display label "Jul-2026"
+const toDisplayMonth = (isoOrKey: string): string => {
+  if (!isoOrKey) return 'Jul-2026';
+  const clean = isoOrKey.trim().replace(/\s+/g, '');
+  const parts = clean.split('-');
+
+  if (parts[0].length === 4 && !isNaN(Number(parts[0]))) {
+    const y = parts[0];
+    const mNum = parts[1].padStart(2, '0');
+    const mName = numberToMonthMap[mNum] || 'Jan';
+    return `${mName}-${y}`;
+  }
+
+  let m = parts[0];
+  let y = parts[1];
+  m = m.charAt(0).toUpperCase() + m.slice(1).toLowerCase();
+  if (m === 'Sept') m = 'Sep';
+  if (y && y.length === 2) y = `20${y}`;
+  return `${m}-${y}`;
+};
+
 const initialDefaultBill: BillData = {
-  id: 'Jul-2026',
+  id: '2026-07',
   month: "Jul-2026",
   totalBill: 1400,
   energyCharge: 828,
@@ -64,44 +116,8 @@ const initialDefaultBill: BillData = {
   readings: { mainPrev: 10659, mainCurr: 10799, motorPrev: 0, motorCurr: 20, son1Prev: 0, son1Curr: 40, son2Prev: 0, son2Curr: 40, son3Prev: 0, son3Curr: 0 }
 };
 
-const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const availableYears = ["2024", "2025", "2026", "2027", "2028", "2029", "2030"];
-
-const sanitizeMonthKey = (rawKey: string): string => {
-  if (!rawKey) return 'Jul-2026';
-  let cleaned = rawKey.trim().replace(/\s+/g, '');
-  cleaned = cleaned.replace(/^Sept-/i, 'Sep-');
-  
-  const parts = cleaned.split('-');
-  if (parts.length !== 2) return cleaned;
-  
-  let [m, y] = parts;
-  m = m.charAt(0).toUpperCase() + m.slice(1).toLowerCase();
-  if (m === 'Sept') m = 'Sep';
-
-  if (y.length === 2) {
-    y = `20${y}`;
-  }
-  return `${m}-${y}`;
-};
-
-const parseMonthKey = (key: string): number => {
-  if (!key) return 0;
-  const normalized = sanitizeMonthKey(key);
-  const [monthStr, yearStr] = normalized.split('-');
-  const months: Record<string, number> = {
-    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
-    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11
-  };
-  
-  const monthIndex = months[monthStr] ?? 0;
-  const year = parseInt(yearStr, 10) || 2026;
-  return new Date(year, monthIndex, 1).getTime();
-};
-
 const calculateTotalEnergyCharge = (totalUnits: number, config: TariffConfig = defaultTariffConfig): number => {
   if (totalUnits <= 0) return 0;
-
   let totalCharge = 0;
   const slab1Units = Math.min(totalUnits, 100);
   totalCharge += slab1Units * config.slab1;
@@ -122,48 +138,38 @@ const calculateTotalEnergyCharge = (totalUnits: number, config: TariffConfig = d
     const slab5Units = totalUnits - 1000;
     totalCharge += slab5Units * config.slab5;
   }
-
   return totalCharge;
 };
 
 export default function BillDashboard() {
   const [isMounted, setIsMounted] = useState(false);
   const [history, setHistory] = useState<BillData[]>([]);
-  const [selectedBillId, setSelectedBillId] = useState<string>('');
+  const [selectedDocId, setSelectedDocId] = useState<string>('2026-07');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isTariffModalOpen, setIsTariffModalOpen] = useState(false);
   const [isAddMonthModalOpen, setIsAddMonthModalOpen] = useState(false);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
 
-  // Sorting State
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
-
-  // Month addition selection
   const [selectedMonth, setSelectedMonth] = useState('Aug');
   const [selectedYear, setSelectedYear] = useState('2026');
-  
-  // Local active state
   const [localBill, setLocalBill] = useState<BillData | null>(null);
 
-  // Custom Display Names
   const [son1Name, setSon1Name] = useState('SUDHIR');
   const [son2Name, setSon2Name] = useState('PRAVIN');
   const [son3Name, setSon3Name] = useState('ANNA');
 
-  // Password Protection State
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [inputPassword, setInputPassword] = useState('');
   const [passwordError, setPasswordError] = useState(false);
   const [appPassword, setAppPassword] = useState('1234');
 
-  // Change Password Modal State
   const [isChangePassModalOpen, setIsChangePassModalOpen] = useState(false);
   const [newPass, setNewPass] = useState('');
   const [confirmPass, setConfirmPass] = useState('');
   const [passChangeError, setPassChangeError] = useState('');
   const [passChangeSuccess, setPassChangeSuccess] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingCsvFile, setPendingCsvFile] = useState<File | null>(null);
   const [isImportConfirmOpen, setIsImportConfirmOpen] = useState(false);
 
@@ -195,9 +201,8 @@ export default function BillDashboard() {
       setPassChangeError('कृपया नवीन पासवर्ड टाका.');
       return;
     }
-
     if (newPass !== confirmPass) {
-      setPassChangeError('पासवर्ड जुळत नाही (Passwords do not match).');
+      setPassChangeError('पासवर्ड जुळत नाही.');
       return;
     }
 
@@ -213,7 +218,7 @@ export default function BillDashboard() {
     }, 1500);
   };
 
-  // Real-time Cloud Sync with Firestore
+  // Firestore Sync - Listens & Normalizes into YYYY-MM
   useEffect(() => {
     setIsMounted(true);
     const q = query(collection(db, 'msedcl_bills'));
@@ -226,7 +231,7 @@ export default function BillDashboard() {
         if (rawDocs.length === 0) {
           setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
           setHistory([initialDefaultBill]);
-          setSelectedBillId(initialDefaultBill.id);
+          setSelectedDocId(initialDefaultBill.id);
           return;
         }
 
@@ -235,36 +240,34 @@ export default function BillDashboard() {
         rawDocs.forEach(d => {
           const b = d.data() as BillData;
           const rawId = d.id;
-          const normKey = sanitizeMonthKey(b.month || b.id || rawId);
-          
+          const isoKey = toIsoDocId(b.id || rawId || b.month);
+          const displayLabel = toDisplayMonth(b.month || isoKey);
+
           const cleanBill: BillData = {
             ...b,
-            id: normKey,
-            month: normKey,
+            id: isoKey,
+            month: displayLabel,
             rawDocId: rawId,
             tariffConfig: b.tariffConfig || defaultTariffConfig
           };
-          uniqueBillsMap.set(normKey, cleanBill);
+          uniqueBillsMap.set(isoKey, cleanBill);
         });
 
-        // Always sort chronologically DESC first
-        const sorted = Array.from(uniqueBillsMap.values()).sort(
-          (a, b) => parseMonthKey(b.id) - parseMonthKey(a.id)
-        );
+        // Sorted automatically by ISO key (YYYY-MM)
+        const sorted = Array.from(uniqueBillsMap.values()).sort((a, b) => b.id.localeCompare(a.id));
 
         setHistory(sorted);
 
-        setSelectedBillId(prev => {
-          const normPrev = sanitizeMonthKey(prev);
-          if (normPrev && sorted.some(b => b.id === normPrev)) {
-            return normPrev;
+        setSelectedDocId(prev => {
+          const isoPrev = toIsoDocId(prev);
+          if (isoPrev && sorted.some(b => b.id === isoPrev)) {
+            return isoPrev;
           }
-          // Default to top-most (most recent) month
-          return sorted[0]?.id || 'Jul-2026';
+          return sorted[0]?.id || '2026-07';
         });
       },
       (error) => {
-        console.error('Firestore onSnapshot error:', error);
+        console.error('Firestore error:', error);
         alert('क्लाउड कनेक्शन अडचण: ' + error.message);
       }
     );
@@ -274,22 +277,20 @@ export default function BillDashboard() {
 
   const lastLoadedIdRef = useRef<string | null>(null);
 
-  // Chronologically Sorted Bills List based on user toggle
+  // Sorted Array based on user toggle
   const sortedBills = [...history].sort((a, b) => {
-    const timeA = parseMonthKey(a.id);
-    const timeB = parseMonthKey(b.id);
-    return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
+    return sortOrder === 'desc' ? b.id.localeCompare(a.id) : a.id.localeCompare(b.id);
   });
 
   useEffect(() => {
-    const target = sortedBills.find(b => b.id === selectedBillId) || sortedBills[0];
+    const target = sortedBills.find(b => b.id === selectedDocId) || sortedBills[0];
     if (!target) return;
 
     if (lastLoadedIdRef.current !== target.id || !localBill) {
       setLocalBill(JSON.parse(JSON.stringify(target)));
       lastLoadedIdRef.current = target.id;
     }
-  }, [selectedBillId, sortedBills, localBill]);
+  }, [selectedDocId, sortedBills, localBill]);
 
   const handleOpenAddMonthModal = () => {
     const latestBill = sortedBills[0] || localBill;
@@ -309,8 +310,9 @@ export default function BillDashboard() {
     setIsAddMonthModalOpen(true);
   };
 
-  const targetMonthName = sanitizeMonthKey(`${selectedMonth}-${selectedYear}`);
-  const isMonthDuplicate = history.some(b => b.month === targetMonthName);
+  const targetIsoId = toIsoDocId(`${selectedMonth}-${selectedYear}`);
+  const targetDisplayName = toDisplayMonth(targetIsoId);
+  const isMonthDuplicate = history.some(b => b.id === targetIsoId);
 
   if (!isMounted || history.length === 0 || !localBill) {
     return (
@@ -364,9 +366,7 @@ export default function BillDashboard() {
 
   const handleCancelEdit = () => {
     const original = history.find(b => b.id === localBill.id);
-    if (original) {
-      setLocalBill(JSON.parse(JSON.stringify(original)));
-    }
+    if (original) setLocalBill(JSON.parse(JSON.stringify(original)));
     setIsEditModalOpen(false);
     setIsTariffModalOpen(false);
   };
@@ -382,7 +382,6 @@ export default function BillDashboard() {
     });
   };
 
-  // Calculations
   const mainUnits = Math.max(0, localBill.readings.mainCurr - localBill.readings.mainPrev);
   const motorUnits = Math.max(0, localBill.readings.motorCurr - localBill.readings.motorPrev);
   const son1Units = Math.max(0, localBill.readings.son1Curr - localBill.readings.son1Prev);
@@ -426,17 +425,19 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
+  // Saves document directly into YYYY-MM document path
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
     setIsTariffModalOpen(false);
 
-    const cleanKey = sanitizeMonthKey(localBill.month || localBill.id);
+    const isoDocId = toIsoDocId(localBill.id || localBill.month);
+    const displayLabel = toDisplayMonth(localBill.month || isoDocId);
 
     const billToSave: BillData = {
       ...localBill,
-      id: cleanKey,
-      month: cleanKey,
+      id: isoDocId,
+      month: displayLabel,
       totalBill: actualTotalBill,
       energyCharge: parseFloat(calculatedEnergyCharge.toFixed(2)),
       fixedPool: {
@@ -447,12 +448,12 @@ export default function BillDashboard() {
     };
 
     try {
-      await setDoc(doc(db, 'msedcl_bills', cleanKey), billToSave);
-      lastLoadedIdRef.current = cleanKey;
-      setSelectedBillId(cleanKey);
-      alert('माहिती क्लाउडवर यशस्वीरित्या सेव्ह झाली आहे!');
+      await setDoc(doc(db, 'msedcl_bills', isoDocId), billToSave);
+      lastLoadedIdRef.current = isoDocId;
+      setSelectedDocId(isoDocId);
+      alert('माहिती क्लाउडवर (YYYY-MM फॉर्मॅटमध्ये) सेव्ह झाली आहे!');
     } catch (error: any) {
-      console.error("Manual save error:", error);
+      console.error("Save error:", error);
       alert('सेव्ह करताना अडचण आली: ' + error.message);
     }
   };
@@ -461,16 +462,14 @@ export default function BillDashboard() {
     if (!localBill) return;
 
     if (isMonthDuplicate) {
-      alert(`त्रुटी: ${targetMonthName} हा महिना आधीच जोडलेला आहे! कृपया दुसरा महिना निवडा.`);
+      alert(`त्रुटी: ${targetDisplayName} (${targetIsoId}) हा महिना आधीच अस्तित्वात आहे!`);
       return;
     }
 
     const sourceBill = localBill;
-    const newId = targetMonthName;
-
     const newBill: BillData = {
-      id: newId,
-      month: targetMonthName,
+      id: targetIsoId,
+      month: targetDisplayName,
       totalBill: 0,
       energyCharge: 0,
       tariffConfig: sourceBill.tariffConfig || defaultTariffConfig,
@@ -487,22 +486,22 @@ export default function BillDashboard() {
     setIsAddMonthModalOpen(false);
 
     try {
-      await setDoc(doc(db, 'msedcl_bills', newId), newBill);
-      lastLoadedIdRef.current = newId;
+      await setDoc(doc(db, 'msedcl_bills', targetIsoId), newBill);
+      lastLoadedIdRef.current = targetIsoId;
       setLocalBill(JSON.parse(JSON.stringify(newBill)));
-      setSelectedBillId(newId);
+      setSelectedDocId(targetIsoId);
     } catch (error: any) {
       alert('महिना जोडताना अडचण आली: ' + error.message);
     }
   };
 
-  // Cloud Delete Execution
   const executeDeleteMonth = async () => {
     if (!deleteCandidateId) return;
     const targetId = deleteCandidateId;
     setDeleteCandidateId(null);
 
-    const cleanKey = sanitizeMonthKey(targetId);
+    const isoKey = toIsoDocId(targetId);
+    const displayLabel = toDisplayMonth(targetId);
 
     try {
       const snap = await getDocs(collection(db, 'msedcl_bills'));
@@ -510,18 +509,18 @@ export default function BillDashboard() {
       
       snap.forEach(d => {
         const rawId = d.id;
-        const norm = sanitizeMonthKey(rawId);
-        if (norm === cleanKey || rawId === targetId) {
+        const dIso = toIsoDocId(rawId);
+        if (dIso === isoKey || rawId === targetId || rawId === displayLabel) {
           deletes.push(deleteDoc(doc(db, 'msedcl_bills', rawId)));
         }
       });
 
       await Promise.all(deletes);
 
-      const nextRemaining = sortedBills.filter(b => b.id !== cleanKey);
+      const nextRemaining = sortedBills.filter(b => b.id !== isoKey);
       if (nextRemaining.length > 0) {
         lastLoadedIdRef.current = nextRemaining[0].id;
-        setSelectedBillId(nextRemaining[0].id);
+        setSelectedDocId(nextRemaining[0].id);
         setLocalBill(JSON.parse(JSON.stringify(nextRemaining[0])));
       }
     } catch (err: any) {
@@ -566,15 +565,16 @@ export default function BillDashboard() {
           await Promise.all(clearPromises);
         }
 
-        let firstImportedKey = '';
+        let topDocId = '';
 
         for (const line of dataLines) {
           const v = line.split(',');
           if (!v[0] && !v[1]) continue;
           
           const rawId = v[0] || v[1];
-          const normKey = sanitizeMonthKey(rawId);
-          if (!firstImportedKey) firstImportedKey = normKey;
+          const isoDocKey = toIsoDocId(rawId);
+          const displayLabel = toDisplayMonth(v[1] || rawId);
+          if (!topDocId) topDocId = isoDocKey;
 
           const hasTariff = v.length >= 26;
 
@@ -608,8 +608,8 @@ export default function BillDashboard() {
           const msedclRoundedTotal = Math.floor(rawTotal / 10) * 10;
 
           const importedBill: BillData = {
-            id: normKey,
-            month: normKey,
+            id: isoDocKey,
+            month: displayLabel,
             totalBill: msedclRoundedTotal,
             energyCharge: parseFloat(eCharge.toFixed(2)),
             tariffConfig: importedTariff,
@@ -623,11 +623,11 @@ export default function BillDashboard() {
             }
           };
 
-          await setDoc(doc(db, 'msedcl_bills', normKey), importedBill);
+          await setDoc(doc(db, 'msedcl_bills', isoDocKey), importedBill);
         }
 
-        if (firstImportedKey) {
-          setSelectedBillId(firstImportedKey);
+        if (topDocId) {
+          setSelectedDocId(topDocId);
         }
       } catch (err: any) {
         alert('CSV फाइल लोड करताना त्रुटी आली: ' + err.message);
@@ -668,7 +668,7 @@ export default function BillDashboard() {
 
       alert('PDF parse completed! Click "Save" to apply changes.');
     } catch (err) {
-      alert('Could not extract auto-data from PDF. You can enter values manually.');
+      alert('Could not extract auto-data from PDF.');
     }
   };
 
@@ -684,490 +684,478 @@ export default function BillDashboard() {
   };
 
   return (
-    <>
-      <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
-        <div className="max-w-6xl mx-auto space-y-6">
+    <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-sans">
+      <div className="max-w-6xl mx-auto space-y-6">
 
-          {/* Top Controls */}
-          <div className="print-hide flex flex-wrap items-center justify-between gap-3 bg-slate-900/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={selectedBillId}
-                onChange={(e) => setSelectedBillId(sanitizeMonthKey(e.target.value))}
-                className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-amber-400 font-bold focus:outline-none cursor-pointer"
-              >
-                {sortedBills.map(b => (
-                  <option key={b.id} value={b.id}>{b.month}</option>
-                ))}
-              </select>
+        {/* Top Controls */}
+        <div className="print-hide flex flex-wrap items-center justify-between gap-3 bg-slate-900/60 backdrop-blur-md p-4 rounded-2xl border border-slate-800">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={selectedDocId}
+              onChange={(e) => setSelectedDocId(e.target.value)}
+              className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-amber-400 font-bold focus:outline-none cursor-pointer"
+            >
+              {sortedBills.map(b => (
+                <option key={b.id} value={b.id}>{b.month}</option>
+              ))}
+            </select>
 
-              <button
-                onClick={() => setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
-                className="flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-3 py-2 rounded-xl text-xs transition-colors"
-              >
-                <ArrowUpDown className="w-3.5 h-3.5 text-amber-400" />
-                <span>{sortOrder === 'desc' ? 'नवीन ते जुने (Newest Top)' : 'जुने ते नवीन (Oldest Top)'}</span>
-              </button>
+            <button
+              onClick={() => setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
+              className="flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-3 py-2 rounded-xl text-xs transition-colors"
+            >
+              <ArrowUpDown className="w-3.5 h-3.5 text-amber-400" />
+              <span>{sortOrder === 'desc' ? 'नवीन ते जुने (Newest Top)' : 'जुने ते नवीन (Oldest Top)'}</span>
+            </button>
 
-              <button onClick={handleManualSave} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm transition-all shadow-lg shadow-emerald-600/20">
-                <Save className="w-4 h-4" /> सेव्ह करा (Save)
-              </button>
+            <button onClick={handleManualSave} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm transition-all shadow-lg shadow-emerald-600/20">
+              <Save className="w-4 h-4" /> सेव्ह करा (Save)
+            </button>
 
-              <button onClick={handleOpenAddMonthModal} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
-                <PlusCircle className="w-4 h-4" /> महिना जोडा
-              </button>
+            <button onClick={handleOpenAddMonthModal} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
+              <PlusCircle className="w-4 h-4" /> महिना जोडा
+            </button>
 
-              <button onClick={() => setIsTariffModalOpen(true)} className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-purple-300 font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg">
-                <Settings className="w-4 h-4 text-purple-400" /> दर व नियम (Settings)
-              </button>
+            <button onClick={() => setIsTariffModalOpen(true)} className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-purple-300 font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg">
+              <Settings className="w-4 h-4 text-purple-400" /> दर व नियम (Settings)
+            </button>
 
-              <button onClick={() => setIsEditModalOpen(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg shadow-blue-600/20">
-                <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit Entry)
-              </button>
+            <button onClick={() => setIsEditModalOpen(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg shadow-blue-600/20">
+              <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit Entry)
+            </button>
 
-              <button 
-                onClick={() => setDeleteCandidateId(localBill.id)} 
-                title="हा महिना हटवा"
-                className="flex items-center gap-1.5 p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/60 transition-colors"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-
-            <button onClick={() => window.print()} className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm shadow-lg shadow-indigo-600/20">
-              <Printer className="w-4 h-4" /> Print PDF Report
+            <button 
+              onClick={() => setDeleteCandidateId(localBill.id)} 
+              title="हा महिना हटवा"
+              className="flex items-center gap-1.5 p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/60 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
             </button>
           </div>
 
-          {/* Header */}
-          <div className="relative overflow-hidden bg-slate-900 print-card p-6 rounded-2xl border border-slate-800">
-            <div className="flex flex-row justify-between items-center gap-4">
-              <div>
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold mb-1.5">
-                  <Zap className="w-3.5 h-3.5 fill-amber-400" /> Live Real-Time Collaborative
-                </div>
-                <h1 className="text-2xl md:text-3xl font-extrabold text-white">
-                  महावितरण वीज बिल वाटप डॅशबोर्ड
-                </h1>
-                <p className="text-slate-400 text-sm mt-0.5">पारदर्शक, अचूक आणि स्वयंचलित कुटुंब वीज बिल व्यवस्थापन</p>
-              </div>
-              <div className="bg-slate-950 px-6 py-3 rounded-xl border border-slate-800 text-center">
-                <span className="text-xs text-slate-400 uppercase tracking-wider block font-semibold">बिलाचा महिना</span>
-                <span className="text-2xl font-black text-amber-400">{localBill.month}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Display Name Customization & Data Tools */}
-          <div className="print-hide grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-2">
-              <div className="flex items-center justify-between">
-                <p className="text-xs text-slate-400 flex items-center gap-2 font-semibold">
-                  <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Customize Display Names):
-                </p>
-                <button 
-                  onClick={() => setIsChangePassModalOpen(true)} 
-                  className="flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 px-2.5 py-1 rounded-lg text-xs text-amber-400 font-semibold transition-colors"
-                >
-                  <Key className="w-3.5 h-3.5" /> पासवर्ड बदला
-                </button>
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                <input type="text" value={son1Name} onChange={(e) => setSon1Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
-                <input type="text" value={son2Name} onChange={(e) => setSon2Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
-                <input type="text" value={son3Name} onChange={(e) => setSon3Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
-              </div>
-            </div>
-
-            <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-xs text-slate-400 font-semibold mb-1">डाटा बॅकअप & PDF अपलोड</p>
-                <div className="flex items-center gap-2">
-                  <button onClick={handleExportCSV} className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-emerald-400 transition-colors">
-                    <Download className="w-3.5 h-3.5" /> Export CSV
-                  </button>
-                  <label className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-blue-400 cursor-pointer transition-colors">
-                    <Upload className="w-3.5 h-3.5" /> Import CSV
-                    <input 
-                      ref={fileInputRef}
-                      type="file" 
-                      accept=".csv" 
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          setPendingCsvFile(file);
-                          setIsImportConfirmOpen(true);
-                          e.target.value = '';
-                        }
-                      }} 
-                      className="hidden" 
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <label className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 px-4 py-2 rounded-xl text-xs text-amber-400 font-semibold cursor-pointer transition-colors">
-                <FileText className="w-4 h-4" /> PDF ऑटो-फेच
-                <input type="file" accept="application/pdf" onChange={handlePDFUpload} className="hidden" />
-              </label>
-            </div>
-          </div>
-
-          {/* Quick Summary Cards */}
-          <div className="grid grid-cols-4 gap-4" key={`summary-${localBill.id}`}>
-            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 text-xs font-bold">एकूण बिल (पूर्णांक देयक)</p>
-              <p className="text-2xl font-black text-emerald-400 mt-1">₹{actualTotalBill}</p>
-            </div>
-
-            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 text-xs font-bold">ऊर्जा आकार (Energy Charge)</p>
-              <p className="text-2xl font-black text-blue-400 mt-1">₹{calculatedEnergyCharge.toFixed(2)}</p>
-            </div>
-
-            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 text-xs font-bold">मुख्य वापर (Main Units)</p>
-              <p className="text-2xl font-black text-purple-400 mt-1">{mainUnits} <span className="text-xs font-bold text-slate-400">U</span></p>
-            </div>
-
-            <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
-              <p className="text-slate-400 text-xs font-bold">प्रभावी दर (Avg Rate/Unit)</p>
-              <p className="text-2xl font-black text-amber-400 mt-1">₹{energyRate.toFixed(2)}</p>
-            </div>
-          </div>
-
-          {/* SECTION 1: Fixed Charges Breakup */}
-          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
-            <h3 className="text-sm font-extrabold text-amber-400 flex items-center gap-2">
-              <ShieldAlert className="text-purple-400 w-4 h-4 print-hide" /> स्थिर आकारांचा तपशील (Fixed Charges Breakup)
-            </h3>
-            <div className="grid grid-cols-5 gap-3 text-xs text-slate-300">
-              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 font-semibold">स्थिर आकार</p>
-                <input type="number" value={localBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-white font-bold mt-1 outline-none" />
-              </div>
-              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 font-semibold">वहन आकार</p>
-                <input type="number" disabled value={computedWheelingCharge} className="w-full bg-slate-900/60 border border-slate-800 rounded px-1.5 py-0.5 text-blue-400 font-bold mt-1 outline-none cursor-not-allowed" />
-              </div>
-              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 font-semibold">इंधन आकार</p>
-                <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-white font-bold mt-1 outline-none" />
-              </div>
-              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 font-semibold">वीज शुल्क</p>
-                <input type="number" disabled value={computedDuty} className="w-full bg-slate-900/60 border border-slate-800 rounded px-1.5 py-0.5 text-purple-400 font-bold mt-1 outline-none cursor-not-allowed" />
-              </div>
-              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-                <p className="text-slate-400 font-semibold text-emerald-400">निव्वळ थकबाकी/जमा</p>
-                <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-emerald-400 font-bold mt-1 outline-none" />
-              </div>
-            </div>
-            <p className="text-xs text-slate-400 pt-1">
-              एकूण स्थिर पूल: <strong className="text-amber-400">₹{totalBundledFixed.toFixed(2)}</strong> (प्रत्येक मुलाचा १/३ हिस्सा: <strong className="text-emerald-400">₹{fixedSharePerSon.toFixed(2)}</strong>)
-            </p>
-          </div>
-
-          {/* SECTION 2: Meter Readings */}
-          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3" key={`readings-${localBill.id}`}>
-            <h3 className="text-sm font-extrabold text-amber-400 flex items-center gap-2">
-              <Activity className="w-4 h-4 print-hide" /> मीटर रीडिंग नोंदवा ({localBill.month})
-            </h3>
-            <div className="grid grid-cols-5 gap-3 text-xs">
-
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-amber-400 text-xs">मुख्य मीटर (Main)</p>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.mainPrev} onChange={(e) => updateActiveField(['readings', 'mainPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-blue-400 text-xs">मोटार (Motor)</p>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.motorPrev} onChange={(e) => updateActiveField(['readings', 'motorPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-slate-200 text-xs">{son1Name}</p>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-slate-200 text-xs">{son2Name}</p>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
-                <p className="font-bold text-slate-200 text-xs">{son3Name}</p>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-          {/* SECTION 3: Individual Payables */}
-          <div className="space-y-3">
-            <div className="inline-block bg-amber-500/10 border border-amber-500/30 px-3 py-1 rounded-lg">
-              <h2 className="text-lg font-extrabold text-amber-400 flex items-center gap-2">
-                <User className="text-amber-400 w-5 h-5 print-hide" /> प्रत्येक सदस्याची देय रक्कम (Individual Payable)
-              </h2>
-            </div>
-
-            <div className="grid grid-cols-4 gap-4">
-
-              {/* Parents */}
-              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
-                <div>
-                  <p className="font-extrabold text-base text-slate-200">आई - बाबा (Parents)</p>
-                  <p className="text-xs text-emerald-400 font-bold mt-0.5">१००% सवलत</p>
-                  <div className="mt-3 text-xs text-slate-400 space-y-1">
-                    <p>वापर: <strong className="text-slate-200">{parentsUnits} Units</strong></p>
-                    <p>खर्च: <strong className="text-slate-200">₹{totalParentsCost.toFixed(2)}</strong></p>
-                  </div>
-                </div>
-                <div className="mt-4 pt-3 border-t border-slate-800">
-                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-emerald-400">₹0.00</p>
-                </div>
-              </div>
-
-              {/* Son 1 */}
-              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-extrabold text-base text-slate-100">{son1Name}</span>
-                    <button onClick={() => shareWhatsApp(son1Name, son1Total, son1Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
-                      <Share2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <div className="text-xs space-y-1 text-slate-400">
-                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• स्वतः ({son1Units} U):</span> <strong className="text-slate-200">₹{son1Direct.toFixed(2)}</strong></p>
-                  </div>
-                </div>
-                <div className="mt-4 pt-3 border-t border-slate-800">
-                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-amber-400">₹{son1Total.toFixed(2)}</p>
-                </div>
-              </div>
-
-              {/* Son 2 */}
-              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-extrabold text-base text-slate-100">{son2Name}</span>
-                    <button onClick={() => shareWhatsApp(son2Name, son2Total, son2Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
-                      <Share2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <div className="text-xs space-y-1 text-slate-400">
-                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• स्वतः ({son2Units} U):</span> <strong className="text-slate-200">₹{son2Direct.toFixed(2)}</strong></p>
-                  </div>
-                </div>
-                <div className="mt-4 pt-3 border-t border-slate-800">
-                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-amber-400">₹{son2Total.toFixed(2)}</p>
-                </div>
-              </div>
-
-              {/* Son 3 */}
-              <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-extrabold text-base text-slate-100">{son3Name}</span>
-                    <button onClick={() => shareWhatsApp(son3Name, son3Total, son3Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
-                      <Share2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <div className="text-xs space-y-1 text-slate-400">
-                    <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
-                    <p className="flex justify-between"><span>• स्वतः ({son3Units} U):</span> <strong className="text-slate-200">₹{son3Direct.toFixed(2)}</strong></p>
-                  </div>
-                </div>
-                <div className="mt-4 pt-3 border-t border-slate-800">
-                  <p className="text-xs text-slate-400 font-bold">Net Payable</p>
-                  <p className="text-2xl font-black text-amber-400">₹{son3Total.toFixed(2)}</p>
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-          {/* PAGE 2 / Charts */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-4">
-              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                <PieChart className="text-amber-400 w-4 h-4 print-hide" /> १. बिल आकार आलेख (Bill Split)
-              </h3>
-              <div className="space-y-3">
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>{son1Name}</span>
-                    <span className="font-black text-amber-400">₹{son1Total.toFixed(2)}</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
-                    <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son1Total / maxCost) * 100)}%` }}></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>{son2Name}</span>
-                    <span className="font-black text-amber-400">₹{son2Total.toFixed(2)}</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
-                    <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son2Total / maxCost) * 100)}%` }}></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>{son3Name}</span>
-                    <span className="font-black text-amber-400">₹{son3Total.toFixed(2)}</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
-                    <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son3Total / maxCost) * 100)}%` }}></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-4">
-              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                <BarChart2 className="text-blue-400 w-4 h-4 print-hide" /> २. युनिट्स वापर आलेख (Units)
-              </h3>
-              <div className="space-y-2.5">
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>{son1Name}</span>
-                    <span className="font-black text-blue-400">{son1Units} U</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
-                    <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son1Units / maxUnits) * 100)}%` }}></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>{son2Name}</span>
-                    <span className="font-black text-blue-400">{son2Units} U</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
-                    <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son2Units / maxUnits) * 100)}%` }}></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>{son3Name}</span>
-                    <span className="font-black text-blue-400">{son3Units} U</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
-                    <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son3Units / maxUnits) * 100)}%` }}></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
-                    <span>पालक वापर</span>
-                    <span className="font-black text-emerald-400">{parentsUnits} U</span>
-                  </div>
-                  <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
-                    <div className="bg-emerald-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (parentsUnits / maxUnits) * 100)}%` }}></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Trend Bar Graph */}
-          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
-            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <TrendingUp className="text-purple-400 w-4 h-4 print-hide" /> ३. मासिक वापर ट्रेंड (Month-over-Month Trend)
-            </h3>
-            <div className="flex items-end justify-around gap-4 h-44 pt-6 pb-2 border-b border-slate-800 overflow-x-auto">
-              {[...sortedBills].reverse().map((b) => {
-                const u = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
-                const heightPct = Math.max(20, (u / maxHistoricalUnits) * 100);
-                const isSelected = b.id === localBill.id;
-
-                return (
-                  <div key={b.id} className="flex-1 min-w-[50px] max-w-[80px] flex flex-col items-center gap-1.5 h-full justify-end">
-                    <span className="text-xs font-black text-purple-300">{u}U</span>
-                    <div className="w-full bg-slate-950 rounded-t-lg h-full flex items-end p-1 border border-slate-800">
-                      <div 
-                        className={`w-full rounded-t-md ${isSelected ? 'bg-indigo-500' : 'bg-slate-700'}`} 
-                        style={{ height: `${heightPct}%` }}
-                      ></div>
-                    </div>
-                    <span className={`text-xs font-bold ${isSelected ? 'text-amber-400' : 'text-slate-400'}`}>{b.month}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Shared Pools Breakdown */}
-          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
-            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <Droplet className="text-blue-400 w-4 h-4 print-hide" /> सामायिक वापर (Shared Pools Breakdown)
-            </h3>
-            <div className="grid grid-cols-2 gap-4 text-xs text-slate-300">
-              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
-                <p className="font-bold text-blue-400 text-sm">🚰 पाण्याच्या मोटार सबमीटर</p>
-                <p className="mt-1 text-xs">एकूण वापर: <strong>{motorUnits} Units</strong> (₹{totalWaterCost.toFixed(2)})</p>
-                <p className="text-xs text-slate-400 mt-1.5">१/३ भाग: <strong className="text-emerald-400">₹{waterSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
-              </div>
-              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
-                <p className="font-bold text-amber-400 text-sm">👴 पालकांचा वैयक्तिक वापर</p>
-                <p className="mt-1 text-xs">एकूण वापर: <strong>{parentsUnits} Units</strong> (₹{totalParentsCost.toFixed(2)})</p>
-                <p className="text-xs text-slate-400 mt-1.5">१/३ भाग: <strong className="text-emerald-400">₹{parentsSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
-              </div>
-            </div>
-          </div>
-
+          <button onClick={() => window.print()} className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm shadow-lg shadow-indigo-600/20">
+            <Printer className="w-4 h-4" /> Print PDF Report
+          </button>
         </div>
-      </main>
+
+        {/* Header */}
+        <div className="relative overflow-hidden bg-slate-900 p-6 rounded-2xl border border-slate-800">
+          <div className="flex flex-row justify-between items-center gap-4">
+            <div>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold mb-1.5">
+                <Zap className="w-3.5 h-3.5 fill-amber-400" /> Live Real-Time Collaborative
+              </div>
+              <h1 className="text-2xl md:text-3xl font-extrabold text-white">
+                महावितरण वीज बिल वाटप डॅशबोर्ड
+              </h1>
+              <p className="text-slate-400 text-sm mt-0.5">पारदर्शक, अचूक आणि स्वयंचलित कुटुंब वीज बिल व्यवस्थापन</p>
+            </div>
+            <div className="bg-slate-950 px-6 py-3 rounded-xl border border-slate-800 text-center">
+              <span className="text-xs text-slate-400 uppercase tracking-wider block font-semibold">बिलाचा महिना</span>
+              <span className="text-2xl font-black text-amber-400">{localBill.month}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Display Name Customization & Data Tools */}
+        <div className="print-hide grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400 flex items-center gap-2 font-semibold">
+                <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Customize Display Names):
+              </p>
+              <button 
+                onClick={() => setIsChangePassModalOpen(true)} 
+                className="flex items-center gap-1 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 px-2.5 py-1 rounded-lg text-xs text-amber-400 font-semibold transition-colors"
+              >
+                <Key className="w-3.5 h-3.5" /> पासवर्ड बदला
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <input type="text" value={son1Name} onChange={(e) => setSon1Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
+              <input type="text" value={son2Name} onChange={(e) => setSon2Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
+              <input type="text" value={son3Name} onChange={(e) => setSon3Name(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200 outline-none" />
+            </div>
+          </div>
+
+          <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs text-slate-400 font-semibold mb-1">डाटा बॅकअप & PDF अपलोड</p>
+              <div className="flex items-center gap-2">
+                <button onClick={handleExportCSV} className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-emerald-400 transition-colors">
+                  <Download className="w-3.5 h-3.5" /> Export CSV
+                </button>
+                <label className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-blue-400 cursor-pointer transition-colors">
+                  <Upload className="w-3.5 h-3.5" /> Import CSV
+                  <input 
+                    type="file" 
+                    accept=".csv" 
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        setPendingCsvFile(file);
+                        setIsImportConfirmOpen(true);
+                        e.target.value = '';
+                      }
+                    }} 
+                    className="hidden" 
+                  />
+                </label>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 px-4 py-2 rounded-xl text-xs text-amber-400 font-semibold cursor-pointer transition-colors">
+              <FileText className="w-4 h-4" /> PDF ऑटो-फेच
+              <input type="file" accept="application/pdf" onChange={handlePDFUpload} className="hidden" />
+            </label>
+          </div>
+        </div>
+
+        {/* Summary Cards */}
+        <div className="grid grid-cols-4 gap-4" key={`summary-${localBill.id}`}>
+          <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+            <p className="text-slate-400 text-xs font-bold">एकूण बिल (पूर्णांक देयक)</p>
+            <p className="text-2xl font-black text-emerald-400 mt-1">₹{actualTotalBill}</p>
+          </div>
+
+          <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+            <p className="text-slate-400 text-xs font-bold">ऊर्जा आकार (Energy Charge)</p>
+            <p className="text-2xl font-black text-blue-400 mt-1">₹{calculatedEnergyCharge.toFixed(2)}</p>
+          </div>
+
+          <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+            <p className="text-slate-400 text-xs font-bold">मुख्य वापर (Main Units)</p>
+            <p className="text-2xl font-black text-purple-400 mt-1">{mainUnits} <span className="text-xs font-bold text-slate-400">U</span></p>
+          </div>
+
+          <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800">
+            <p className="text-slate-400 text-xs font-bold">प्रभावी दर (Avg Rate/Unit)</p>
+            <p className="text-2xl font-black text-amber-400 mt-1">₹{energyRate.toFixed(2)}</p>
+          </div>
+        </div>
+
+        {/* Fixed Charges Breakup */}
+        <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
+          <h3 className="text-sm font-extrabold text-amber-400 flex items-center gap-2">
+            <ShieldAlert className="text-purple-400 w-4 h-4 print-hide" /> स्थिर आकारांचा तपशील (Fixed Charges Breakup)
+          </h3>
+          <div className="grid grid-cols-5 gap-3 text-xs text-slate-300">
+            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <p className="text-slate-400 font-semibold">स्थिर आकार</p>
+              <input type="number" value={localBill.fixedPool.fixedCharge} onChange={(e) => updateActiveField(['fixedPool', 'fixedCharge'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-white font-bold mt-1 outline-none" />
+            </div>
+            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <p className="text-slate-400 font-semibold">वहन आकार</p>
+              <input type="number" disabled value={computedWheelingCharge} className="w-full bg-slate-900/60 border border-slate-800 rounded px-1.5 py-0.5 text-blue-400 font-bold mt-1 outline-none cursor-not-allowed" />
+            </div>
+            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <p className="text-slate-400 font-semibold">इंधन आकार</p>
+              <input type="number" value={localBill.fixedPool.fac} onChange={(e) => updateActiveField(['fixedPool', 'fac'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-white font-bold mt-1 outline-none" />
+            </div>
+            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <p className="text-slate-400 font-semibold">वीज शुल्क</p>
+              <input type="number" disabled value={computedDuty} className="w-full bg-slate-900/60 border border-slate-800 rounded px-1.5 py-0.5 text-purple-400 font-bold mt-1 outline-none cursor-not-allowed" />
+            </div>
+            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <p className="text-slate-400 font-semibold text-emerald-400">निव्वळ थकबाकी/जमा</p>
+              <input type="number" value={localBill.fixedPool.adjustments} onChange={(e) => updateActiveField(['fixedPool', 'adjustments'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-emerald-400 font-bold mt-1 outline-none" />
+            </div>
+          </div>
+          <p className="text-xs text-slate-400 pt-1">
+            एकूण स्थिर पूल: <strong className="text-amber-400">₹{totalBundledFixed.toFixed(2)}</strong> (प्रत्येक मुलाचा १/३ हिस्सा: <strong className="text-emerald-400">₹{fixedSharePerSon.toFixed(2)}</strong>)
+          </p>
+        </div>
+
+        {/* Meter Readings */}
+        <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3" key={`readings-${localBill.id}`}>
+          <h3 className="text-sm font-extrabold text-amber-400 flex items-center gap-2">
+            <Activity className="w-4 h-4 print-hide" /> मीटर रीडिंग नोंदवा ({localBill.month})
+          </h3>
+          <div className="grid grid-cols-5 gap-3 text-xs">
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+              <p className="font-bold text-amber-400 text-xs">मुख्य मीटर (Main)</p>
+              <div>
+                <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                <input type="number" value={localBill.readings.mainPrev} onChange={(e) => updateActiveField(['readings', 'mainPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+              <div>
+                <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                <input type="number" value={localBill.readings.mainCurr} onChange={(e) => updateActiveField(['readings', 'mainCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+              <p className="font-bold text-blue-400 text-xs">मोटार (Motor)</p>
+              <div>
+                <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                <input type="number" value={localBill.readings.motorPrev} onChange={(e) => updateActiveField(['readings', 'motorPrev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+              <div>
+                <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                <input type="number" value={localBill.readings.motorCurr} onChange={(e) => updateActiveField(['readings', 'motorCurr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+              <p className="font-bold text-slate-200 text-xs">{son1Name}</p>
+              <div>
+                <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+              <div>
+                <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+              <p className="font-bold text-slate-200 text-xs">{son2Name}</p>
+              <div>
+                <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+              <div>
+                <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1.5">
+              <p className="font-bold text-slate-200 text-xs">{son3Name}</p>
+              <div>
+                <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
+                <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+              <div>
+                <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
+                <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Individual Payables */}
+        <div className="space-y-3">
+          <div className="inline-block bg-amber-500/10 border border-amber-500/30 px-3 py-1 rounded-lg">
+            <h2 className="text-lg font-extrabold text-amber-400 flex items-center gap-2">
+              <User className="text-amber-400 w-5 h-5 print-hide" /> प्रत्येक सदस्याची देय रक्कम (Individual Payable)
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-4 gap-4">
+            {/* Parents */}
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div>
+                <p className="font-extrabold text-base text-slate-200">आई - बाबा (Parents)</p>
+                <p className="text-xs text-emerald-400 font-bold mt-0.5">१००% सवलत</p>
+                <div className="mt-3 text-xs text-slate-400 space-y-1">
+                  <p>वापर: <strong className="text-slate-200">{parentsUnits} Units</strong></p>
+                  <p>खर्च: <strong className="text-slate-200">₹{totalParentsCost.toFixed(2)}</strong></p>
+                </div>
+              </div>
+              <div className="mt-4 pt-3 border-t border-slate-800">
+                <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                <p className="text-2xl font-black text-emerald-400">₹0.00</p>
+              </div>
+            </div>
+
+            {/* Son 1 */}
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-extrabold text-base text-slate-100">{son1Name}</span>
+                  <button onClick={() => shareWhatsApp(son1Name, son1Total, son1Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
+                    <Share2 className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="text-xs space-y-1 text-slate-400">
+                  <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• स्वतः ({son1Units} U):</span> <strong className="text-slate-200">₹{son1Direct.toFixed(2)}</strong></p>
+                </div>
+              </div>
+              <div className="mt-4 pt-3 border-t border-slate-800">
+                <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                <p className="text-2xl font-black text-amber-400">₹{son1Total.toFixed(2)}</p>
+              </div>
+            </div>
+
+            {/* Son 2 */}
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-extrabold text-base text-slate-100">{son2Name}</span>
+                  <button onClick={() => shareWhatsApp(son2Name, son2Total, son2Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
+                    <Share2 className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="text-xs space-y-1 text-slate-400">
+                  <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• स्वतः ({son2Units} U):</span> <strong className="text-slate-200">₹{son2Direct.toFixed(2)}</strong></p>
+                </div>
+              </div>
+              <div className="mt-4 pt-3 border-t border-slate-800">
+                <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                <p className="text-2xl font-black text-amber-400">₹{son2Total.toFixed(2)}</p>
+              </div>
+            </div>
+
+            {/* Son 3 */}
+            <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-extrabold text-base text-slate-100">{son3Name}</span>
+                  <button onClick={() => shareWhatsApp(son3Name, son3Total, son3Units)} className="print-hide text-emerald-400 p-1.5 rounded-lg bg-emerald-500/10">
+                    <Share2 className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="text-xs space-y-1 text-slate-400">
+                  <p className="flex justify-between"><span>• स्थिर आकार:</span> <strong className="text-slate-200">₹{fixedSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• मोटार भाग:</span> <strong className="text-slate-200">₹{waterSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• पालक भाग:</span> <strong className="text-slate-200">₹{parentsSharePerSon.toFixed(2)}</strong></p>
+                  <p className="flex justify-between"><span>• स्वतः ({son3Units} U):</span> <strong className="text-slate-200">₹{son3Direct.toFixed(2)}</strong></p>
+                </div>
+              </div>
+              <div className="mt-4 pt-3 border-t border-slate-800">
+                <p className="text-xs text-slate-400 font-bold">Net Payable</p>
+                <p className="text-2xl font-black text-amber-400">₹{son3Total.toFixed(2)}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Charts & Trends */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-4">
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+              <PieChart className="text-amber-400 w-4 h-4 print-hide" /> १. बिल आकार आलेख (Bill Split)
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>{son1Name}</span>
+                  <span className="font-black text-amber-400">₹{son1Total.toFixed(2)}</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
+                  <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son1Total / maxCost) * 100)}%` }}></div>
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>{son2Name}</span>
+                  <span className="font-black text-amber-400">₹{son2Total.toFixed(2)}</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
+                  <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son2Total / maxCost) * 100)}%` }}></div>
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>{son3Name}</span>
+                  <span className="font-black text-amber-400">₹{son3Total.toFixed(2)}</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
+                  <div className="bg-amber-400 h-3 rounded-full" style={{ width: `${Math.max(8, (son3Total / maxCost) * 100)}%` }}></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-4">
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+              <BarChart2 className="text-blue-400 w-4 h-4 print-hide" /> २. युनिट्स वापर आलेख (Units)
+            </h3>
+            <div className="space-y-2.5">
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>{son1Name}</span>
+                  <span className="font-black text-blue-400">{son1Units} U</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                  <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son1Units / maxUnits) * 100)}%` }}></div>
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>{son2Name}</span>
+                  <span className="font-black text-blue-400">{son2Units} U</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                  <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son2Units / maxUnits) * 100)}%` }}></div>
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>{son3Name}</span>
+                  <span className="font-black text-blue-400">{son3Units} U</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                  <div className="bg-blue-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (son3Units / maxUnits) * 100)}%` }}></div>
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-xs text-slate-300 mb-1 font-bold">
+                  <span>पालक वापर</span>
+                  <span className="font-black text-emerald-400">{parentsUnits} U</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                  <div className="bg-emerald-500 h-2.5 rounded-full" style={{ width: `${Math.max(8, (parentsUnits / maxUnits) * 100)}%` }}></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Trend Bar Graph */}
+        <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
+          <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+            <TrendingUp className="text-purple-400 w-4 h-4 print-hide" /> ३. मासिक वापर ट्रेंड (Month-over-Month Trend)
+          </h3>
+          <div className="flex items-end justify-around gap-4 h-44 pt-6 pb-2 border-b border-slate-800 overflow-x-auto">
+            {[...sortedBills].reverse().map((b) => {
+              const u = Math.max(0, b.readings.mainCurr - b.readings.mainPrev);
+              const heightPct = Math.max(20, (u / maxHistoricalUnits) * 100);
+              const isSelected = b.id === localBill.id;
+
+              return (
+                <div key={b.id} className="flex-1 min-w-[50px] max-w-[80px] flex flex-col items-center gap-1.5 h-full justify-end">
+                  <span className="text-xs font-black text-purple-300">{u}U</span>
+                  <div className="w-full bg-slate-950 rounded-t-lg h-full flex items-end p-1 border border-slate-800">
+                    <div 
+                      className={`w-full rounded-t-md ${isSelected ? 'bg-indigo-500' : 'bg-slate-700'}`} 
+                      style={{ height: `${heightPct}%` }}
+                    ></div>
+                  </div>
+                  <span className={`text-xs font-bold ${isSelected ? 'text-amber-400' : 'text-slate-400'}`}>{b.month}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Shared Pools */}
+        <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 space-y-3">
+          <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+            <Droplet className="text-blue-400 w-4 h-4 print-hide" /> सामायिक वापर (Shared Pools Breakdown)
+          </h3>
+          <div className="grid grid-cols-2 gap-4 text-xs text-slate-300">
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+              <p className="font-bold text-blue-400 text-sm">🚰 पाण्याच्या मोटार सबमीटर</p>
+              <p className="mt-1 text-xs">एकूण वापर: <strong>{motorUnits} Units</strong> (₹{totalWaterCost.toFixed(2)})</p>
+              <p className="text-xs text-slate-400 mt-1.5">१/३ भाग: <strong className="text-emerald-400">₹{waterSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
+            </div>
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+              <p className="font-bold text-amber-400 text-sm">👴 पालकांचा वैयक्तिक वापर</p>
+              <p className="mt-1 text-xs">एकूण वापर: <strong>{parentsUnits} Units</strong> (₹{totalParentsCost.toFixed(2)})</p>
+              <p className="text-xs text-slate-400 mt-1.5">१/३ भाग: <strong className="text-emerald-400">₹{parentsSharePerSon.toFixed(2)} / व्यक्ती</strong></p>
+            </div>
+          </div>
+        </div>
+
+      </div>
 
       {/* CSV IMPORT DIALOG */}
       {isImportConfirmOpen && pendingCsvFile && (
@@ -1177,7 +1165,7 @@ export default function BillDashboard() {
               <Upload className="w-5 h-5" /> CSV डेटा इम्पोर्ट पर्याय निवडा
             </h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              तुम्हाला आधीचा जुना डेटा पूर्णपणे पुसून (Clear Old Cloud Data) फक्त या नवीन CSV मधील महिने ठेवायचे आहेत की दोन्ही महिने एकत्र (Merge) करायचे आहेत?
+              तुम्हाला जुना सर्व डेटा पुसून (Clear Old Cloud Data) फक्त या नवीन CSV मधील महिने <strong className="text-amber-400">YYYY-MM</strong> स्वरूपात ठेवायचे आहेत का?
             </p>
             <div className="flex flex-col gap-2 pt-2">
               <button
@@ -1222,7 +1210,7 @@ export default function BillDashboard() {
               <Trash2 className="w-5 h-5" /> महिना कायमचा हटवायचा का?
             </h3>
             <p className="text-xs text-slate-300">
-              तुम्हाला खात्री आहे का की <strong className="text-amber-400">"{deleteCandidateId}"</strong> बिल नोंद क्लाउडवरून कायमची हटवायची आहे?
+              तुम्हाला खात्री आहे का की <strong className="text-amber-400">"{toDisplayMonth(deleteCandidateId)} ({toIsoDocId(deleteCandidateId)})"</strong> नोंद कायमची हटवायची आहे?
             </p>
             <div className="pt-2 flex justify-end gap-2">
               <button 
@@ -1256,7 +1244,6 @@ export default function BillDashboard() {
             <div className="space-y-4 text-xs">
               <div className="p-3 bg-purple-500/10 border border-purple-500/30 rounded-xl space-y-1">
                 <p className="font-bold text-purple-300">⚡ महावितरण वीज आकार स्लॅब दर (Per Unit Rate):</p>
-                <p className="text-[11px] text-slate-400">येथे बदल केलेले दर CSV फाइलमधून सेव्ह किंवा लोड होतील.</p>
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -1333,11 +1320,11 @@ export default function BillDashboard() {
               {isMonthDuplicate ? (
                 <div className="p-2.5 bg-rose-500/10 border border-rose-500/40 rounded-xl text-[11px] text-rose-400 flex items-center gap-1.5 font-semibold">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>{targetMonthName} हा महिना आधीच जोडलेला आहे!</span>
+                  <span>{targetDisplayName} ({targetIsoId}) हा महिना आधीच अस्तित्वात आहे!</span>
                 </div>
               ) : (
                 <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400">
-                  नवा महिना: <span className="text-amber-400 font-bold">{targetMonthName}</span>
+                  नवा महिना: <span className="text-amber-400 font-bold">{targetDisplayName}</span> ({targetIsoId})
                 </div>
               )}
             </div>
@@ -1365,17 +1352,17 @@ export default function BillDashboard() {
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="text-slate-300 block mb-1">नवीन पासवर्ड (New Password)</label>
+                <label className="text-slate-300 block mb-1">नवीन पासवर्ड</label>
                 <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} placeholder="नवीन पासवर्ड लिहा" className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500" autoFocus />
               </div>
 
               <div>
-                <label className="text-slate-300 block mb-1">पासवर्ड पुन्हा टाका (Confirm Password)</label>
+                <label className="text-slate-300 block mb-1">पासवर्ड पुन्हा टाका</label>
                 <input type="password" value={confirmPass} onChange={(e) => setConfirmPass(e.target.value)} placeholder="पुन्हा तोच पासवर्ड टाका" className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none focus:border-amber-500" />
               </div>
 
               {passChangeError && <p className="text-rose-400 text-center font-semibold text-[11px]">{passChangeError}</p>}
-              {passChangeSuccess && <p className="text-emerald-400 text-center font-semibold text-[11px]">पासवर्ड यशस्वीरित्या बदलला! (Success)</p>}
+              {passChangeSuccess && <p className="text-emerald-400 text-center font-semibold text-[11px]">पासवर्ड यशस्वीरित्या बदलला!</p>}
             </div>
 
             <div className="pt-2 flex justify-end gap-2">
@@ -1467,6 +1454,6 @@ export default function BillDashboard() {
           </div>
         </div>
       )}
-    </>
+    </main>
   );
 }
