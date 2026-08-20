@@ -3,12 +3,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db } from '@/lib/firebase';
 import { 
-  collection, onSnapshot, doc, setDoc, deleteDoc, query 
+  collection, onSnapshot, doc, setDoc, deleteDoc, getDocs, query 
 } from 'firebase/firestore';
 import { 
   Zap, Droplet, User, Share2, BarChart2, Edit3, 
   ShieldAlert, FileText, Download, Upload, PlusCircle, 
-  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X, AlertTriangle, ArrowUpDown, Settings
+  Trash2, Printer, TrendingUp, PieChart, Activity, Check, Key, Save, X, AlertTriangle, ArrowUpDown, Settings, RefreshCw
 } from 'lucide-react';
 
 interface TariffConfig {
@@ -24,6 +24,7 @@ interface TariffConfig {
 interface BillData {
   id: string;
   month: string;
+  rawDocId?: string;
   totalBill: number;
   energyCharge: number;
   tariffConfig?: TariffConfig;
@@ -76,7 +77,6 @@ const sanitizeMonthKey = (rawKey: string): string => {
   if (parts.length !== 2) return cleaned;
   
   let [m, y] = parts;
-  // Capitalize first letter of month (e.g., sep -> Sep)
   m = m.charAt(0).toUpperCase() + m.slice(1).toLowerCase();
   if (m === 'Sept') m = 'Sep';
 
@@ -106,30 +106,24 @@ const calculateTotalEnergyCharge = (totalUnits: number, config: TariffConfig = d
   if (totalUnits <= 0) return 0;
 
   let totalCharge = 0;
-
-  // Slab 1: 0 - 100 units
   const slab1Units = Math.min(totalUnits, 100);
   totalCharge += slab1Units * config.slab1;
 
-  // Slab 2: 101 - 300 units
   if (totalUnits > 100) {
     const slab2Units = Math.min(totalUnits - 100, 200);
     totalCharge += slab2Units * config.slab2;
   }
 
-  // Slab 3: 301 - 500 units
   if (totalUnits > 300) {
     const slab3Units = Math.min(totalUnits - 300, 200);
     totalCharge += slab3Units * config.slab3;
   }
 
-  // Slab 4: 501 - 1000 units
   if (totalUnits > 500) {
     const slab4Units = Math.min(totalUnits - 500, 500);
     totalCharge += slab4Units * config.slab4;
   }
 
-  // Slab 5: Above 1000 units
   if (totalUnits > 1000) {
     const slab5Units = totalUnits - 1000;
     totalCharge += slab5Units * config.slab5;
@@ -224,7 +218,7 @@ export default function BillDashboard() {
     }, 1500);
   };
 
-  // Real-time Cloud Sync with Firestore & Deduplication
+  // Real-time Cloud Sync with Firestore
   useEffect(() => {
     setIsMounted(true);
     const q = query(collection(db, 'msedcl_bills'));
@@ -232,26 +226,27 @@ export default function BillDashboard() {
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const rawBills: BillData[] = snapshot.docs.map(doc => doc.data() as BillData);
+        const rawDocs = snapshot.docs;
 
-        if (rawBills.length === 0) {
-          console.log("No collection found, seeding default bill...");
+        if (rawDocs.length === 0) {
           setDoc(doc(db, 'msedcl_bills', initialDefaultBill.id), initialDefaultBill);
           return;
         }
 
-        // Map and deduplicate by sanitized month key
         const uniqueBillsMap = new Map<string, BillData>();
 
-        rawBills.forEach(b => {
-          const normKey = sanitizeMonthKey(b.id || b.month);
+        rawDocs.forEach(d => {
+          const b = d.data() as BillData;
+          const rawId = d.id;
+          const normKey = sanitizeMonthKey(b.month || b.id || rawId);
+          
           const cleanBill: BillData = {
             ...b,
             id: normKey,
             month: normKey,
+            rawDocId: rawId,
             tariffConfig: b.tariffConfig || defaultTariffConfig
           };
-          // Overwrite duplicate keys so only 1 entry exists per month in memory
           uniqueBillsMap.set(normKey, cleanBill);
         });
 
@@ -264,7 +259,7 @@ export default function BillDashboard() {
           if (normPrev && deduplicatedBills.some(b => b.id === normPrev)) {
             return normPrev;
           }
-          return deduplicatedBills[0].id;
+          return deduplicatedBills[0]?.id || 'Jul-2026';
         });
       },
       (error) => {
@@ -316,19 +311,17 @@ export default function BillDashboard() {
   const targetMonthName = sanitizeMonthKey(`${selectedMonth}-${selectedYear}`);
   const isMonthDuplicate = history.some(b => b.month === targetMonthName);
 
-  // Loading Screen
   if (!isMounted || history.length === 0 || !localBill) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center font-sans">
         <div className="text-center space-y-3">
           <Zap className="w-10 h-10 text-amber-400 animate-bounce mx-auto" />
-          <p className="text-amber-400 text-xl font-bold tracking-wide">क्लाउड डाटा कनेक्ट होत आहे...</p>
+          <p className="text-amber-400 text-xl font-bold tracking-wide">क्लाउड डाटा लोड होत आहे...</p>
         </div>
       </div>
     );
   }
 
-  // Password Login Screen
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans selection:bg-amber-500 selection:text-slate-950">
@@ -366,10 +359,8 @@ export default function BillDashboard() {
     );
   }
 
-  // Active Tariff Config
   const currentTariff = localBill.tariffConfig || defaultTariffConfig;
 
-  // Cancel edits
   const handleCancelEdit = () => {
     const original = history.find(b => b.id === localBill.id);
     if (original) {
@@ -379,7 +370,6 @@ export default function BillDashboard() {
     setIsTariffModalOpen(false);
   };
 
-  // Local state update
   const updateActiveField = (path: string[], value: number | string) => {
     setLocalBill(prev => {
       if (!prev) return prev;
@@ -400,19 +390,11 @@ export default function BillDashboard() {
 
   const parentsUnits = Math.max(0, mainUnits - (motorUnits + son1Units + son2Units + son3Units));
 
-  // Dynamic Calculations based on Tariff Rates
   const calculatedEnergyCharge = calculateTotalEnergyCharge(mainUnits, currentTariff);
-  
-  // Dynamic Wheeling Charge = Main Units * Wheeling Rate
   const computedWheelingCharge = parseFloat((mainUnits * currentTariff.wheelingRate).toFixed(2));
-
-  // Base sum for Duty Calculation = Fixed + Energy + Wheeling + FAC
   const baseDutySum = localBill.fixedPool.fixedCharge + calculatedEnergyCharge + computedWheelingCharge + localBill.fixedPool.fac;
-  
-  // Dynamic Duty = Base Sum * Duty %
   const computedDuty = parseFloat((baseDutySum * (currentTariff.dutyPercent / 100)).toFixed(2));
 
-  // Fixed Charges Pool Total
   const totalBundledFixed = parseFloat((
     localBill.fixedPool.fixedCharge + 
     computedWheelingCharge + 
@@ -421,21 +403,13 @@ export default function BillDashboard() {
     localBill.fixedPool.adjustments
   ).toFixed(2));
 
-  // Raw Bill Sum
   const rawTotalBill = calculatedEnergyCharge + totalBundledFixed;
-
-  // Official MSEDCL Rounding Rule (Unit digit is always 0 -> Math.floor to nearest 10)
   const actualTotalBill = Math.floor(rawTotalBill / 10) * 10;
 
-  // Derived Effective Rate per Unit
   const energyRate = mainUnits > 0 ? calculatedEnergyCharge / mainUnits : 0;
-
   const fixedSharePerSon = totalBundledFixed / 3;
-
-  // Shared Costs
   const totalWaterCost = motorUnits * energyRate;
   const waterSharePerSon = totalWaterCost / 3;
-
   const totalParentsCost = parentsUnits * energyRate;
   const parentsSharePerSon = totalParentsCost / 3;
 
@@ -451,7 +425,7 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Save to Cloud with Strict Key Sanitization
+  // Robust Save: Cleans both normalized ID and removes any obsolete raw duplicate docs
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
@@ -473,7 +447,6 @@ export default function BillDashboard() {
     };
 
     try {
-      // OVERWRITE existing document using clean key
       await setDoc(doc(db, 'msedcl_bills', cleanKey), billToSave);
       lastLoadedIdRef.current = cleanKey;
       setSelectedBillId(cleanKey);
@@ -484,7 +457,6 @@ export default function BillDashboard() {
     }
   };
 
-  // Add New Month Entry
   const handleConfirmAddMonth = async () => {
     if (!localBill) return;
 
@@ -519,23 +491,48 @@ export default function BillDashboard() {
       lastLoadedIdRef.current = newId;
       setLocalBill(JSON.parse(JSON.stringify(newBill)));
       setSelectedBillId(newId);
-      alert(`${targetMonthName} जोडला गेला आहे! मागील रीडींग्स (${sourceBill.month}) यशस्वीरित्या कॅरी फॉरवर्ड झाल्या.`);
+      alert(`${targetMonthName} जोडला गेला आहे!`);
     } catch (error: any) {
       alert('महिना जोडताना अडचण आली: ' + error.message);
     }
   };
 
+  // Comprehensive Cloud Delete: Deletes sanitized ID and all raw doc representations in Firestore
   const handleDeleteMonth = async (id: string) => {
     if (history.length <= 1) {
       alert('किमान एक बिल नोंद शिल्लक असणे आवश्यक आहे.');
       return;
     }
-    if (confirm("Are you sure you want to delete this bill entry?")) {
-      const cleanKey = sanitizeMonthKey(id);
-      await deleteDoc(doc(db, 'msedcl_bills', cleanKey));
+    if (!confirm(`तुम्हाला खात्री आहे का की "${id}" बिल नोंद कायमची हटवायची आहे?`)) return;
+
+    const cleanKey = sanitizeMonthKey(id);
+    const shortYearKey = cleanKey.replace('-20', '-'); // e.g. Oct-26
+
+    try {
+      // Delete all possible ID variants from Firestore
+      const keysToDelete = [cleanKey, shortYearKey, id, `${cleanKey} `, `${shortYearKey} `];
+      
+      const snap = await getDocs(collection(db, 'msedcl_bills'));
+      const deletePromises: Promise<void>[] = [];
+      
+      snap.forEach(d => {
+        const rawId = d.id;
+        const norm = sanitizeMonthKey(rawId);
+        if (norm === cleanKey || keysToDelete.includes(rawId)) {
+          deletePromises.push(deleteDoc(doc(db, 'msedcl_bills', rawId)));
+        }
+      });
+
+      await Promise.all(deletePromises);
+
       const remaining = history.filter(b => b.id !== cleanKey);
-      lastLoadedIdRef.current = remaining[0].id;
-      setSelectedBillId(remaining[0].id);
+      if (remaining.length > 0) {
+        lastLoadedIdRef.current = remaining[0].id;
+        setSelectedBillId(remaining[0].id);
+      }
+      alert(`"${id}" नोंद क्लाउडवरून यशस्वीरित्या हटवली गेली!`);
+    } catch (err: any) {
+      alert('हटवताना अडचण आली: ' + err.message);
     }
   };
 
@@ -563,19 +560,32 @@ export default function BillDashboard() {
     a.click();
   };
 
-  // Import CSV Handler with strict sanitization
+  // Full Clean & Replace CSV Import Handler
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    const shouldClearOld = confirm(
+      "तुम्हाला आधीचा जुना सर्व क्लाउड डाटा पुसून (Clear Old Cloud Data), फक्त या नवीन CSV मधील महिने ठेवायचे आहेत का?\n\n(Click OK to fully replace with CSV entries, or Cancel to merge)"
+    );
 
     const reader = new FileReader();
     reader.onload = async (evt) => {
       try {
         const text = evt.target?.result as string;
-        const lines = text.trim().split('\n').slice(1);
-        for (const line of lines) {
+        const lines = text.trim().split('\n').filter(l => l.trim().length > 0);
+        const dataLines = lines.slice(1);
+
+        // If replace mode, clear all existing Firestore docs first
+        if (shouldClearOld) {
+          const oldDocsSnap = await getDocs(collection(db, 'msedcl_bills'));
+          const clearPromises = oldDocsSnap.docs.map(d => deleteDoc(d.ref));
+          await Promise.all(clearPromises);
+        }
+
+        for (const line of dataLines) {
           const v = line.split(',');
-          if (!v[0]) continue;
+          if (!v[0] && !v[1]) continue;
           
           const rawId = v[0] || v[1];
           const normKey = sanitizeMonthKey(rawId);
@@ -626,17 +636,17 @@ export default function BillDashboard() {
               son3Prev: parseFloat(v[17 + offset]) || 0, son3Curr: parseFloat(v[18 + offset]) || 0,
             }
           };
-          await setDoc(doc(db, 'msedcl_bills', normKey), importedBill, { merge: true });
+
+          await setDoc(doc(db, 'msedcl_bills', normKey), importedBill);
         }
-        alert('CSV data imported and deduplicated successfully!');
-      } catch (err) {
-        alert('Failed to parse CSV file. Please check format.');
+        alert('CSV फाइल मधील सर्व माहिती क्लाउडवर अचूक सेव्ह झाली आहे!');
+      } catch (err: any) {
+        alert('CSV फाइल लोड करताना त्रुटी आली: ' + err.message);
       }
     };
     reader.readAsText(file);
   };
 
-  // PDF Auto-Fetch Handler
   const handlePDFUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -745,11 +755,11 @@ export default function BillDashboard() {
                 className="flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-3 py-2 rounded-xl text-xs transition-colors"
               >
                 <ArrowUpDown className="w-3.5 h-3.5 text-amber-400" />
-                <span>{sortOrder === 'desc' ? 'नवीन ते जुने (New → Old)' : 'जुने ते नवीन (Old → New)'}</span>
+                <span>{sortOrder === 'desc' ? 'नवीन ते जुने' : 'जुने ते नवीन'}</span>
               </button>
 
               <button onClick={handleManualSave} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm transition-all shadow-lg shadow-emerald-600/20">
-                <Save className="w-4 h-4" /> सेव्ह करा (Save)
+                <Save className="w-4 h-4" /> सेव्ह करा
               </button>
 
               <button onClick={handleOpenAddMonthModal} className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold px-4 py-2 rounded-xl text-sm transition-all shadow-lg shadow-amber-500/10">
@@ -761,16 +771,20 @@ export default function BillDashboard() {
               </button>
 
               <button onClick={() => setIsEditModalOpen(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3.5 py-2 rounded-xl text-sm shadow-lg shadow-blue-600/20">
-                <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit Entry)
+                <Edit3 className="w-4 h-4" /> दुरुस्ती (Edit)
               </button>
 
-              <button onClick={() => handleDeleteMonth(localBill.id)} className="p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/40">
+              <button 
+                onClick={() => handleDeleteMonth(localBill.id)} 
+                title="हा महिना हटवा"
+                className="flex items-center gap-1.5 p-2 bg-rose-950/40 text-rose-400 border border-rose-900/50 rounded-xl hover:bg-rose-900/60 transition-colors"
+              >
                 <Trash2 className="w-4 h-4" />
               </button>
             </div>
 
             <button onClick={() => window.print()} className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm shadow-lg shadow-indigo-600/20">
-              <Printer className="w-4 h-4" /> Print PDF Report
+              <Printer className="w-4 h-4" /> Print PDF
             </button>
           </div>
 
@@ -798,7 +812,7 @@ export default function BillDashboard() {
             <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-slate-400 flex items-center gap-2 font-semibold">
-                  <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Customize Display Names):
+                  <Edit3 className="w-4 h-4 text-amber-400" /> नावे बदला (Display Names):
                 </p>
                 <button 
                   onClick={() => setIsChangePassModalOpen(true)} 
@@ -816,7 +830,7 @@ export default function BillDashboard() {
 
             <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-xs text-slate-400 font-semibold mb-1">डाटा बॅकअप & PDF अपलोड</p>
+                <p className="text-xs text-slate-400 font-semibold mb-1">डाटा बॅकअप & CSV इम्पोर्ट</p>
                 <div className="flex items-center gap-2">
                   <button onClick={handleExportCSV} className="flex items-center gap-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 px-3 py-1.5 rounded-xl text-xs text-emerald-400 transition-colors">
                     <Download className="w-3.5 h-3.5" /> Export CSV
@@ -937,11 +951,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-slate-200 print-header-text text-xs">{son2Name}</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -949,11 +963,11 @@ export default function BillDashboard() {
                 <p className="font-bold text-slate-200 print-header-text text-xs">{son3Name}</p>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">मागणी (Prev)</label>
-                  <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-400 print-sub-text block text-[11px]">चालू (Curr)</label>
-                  <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 print:bg-white border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
+                  <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 print:border-slate-300 rounded px-2 py-1 text-slate-200 print-header-text font-bold outline-none" />
                 </div>
               </div>
 
@@ -1372,7 +1386,6 @@ export default function BillDashboard() {
               ) : (
                 <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400">
                   नवा महिना: <span className="text-amber-400 font-bold">{targetMonthName}</span>
-                  {" — रीडिंग मागील महिन्यापासून ("}{localBill.month}{") कॅरी फॉरवर्ड होईल"}
                 </div>
               )}
             </div>
@@ -1383,7 +1396,7 @@ export default function BillDashboard() {
                 onClick={() => setIsAddMonthModalOpen(false)} 
                 className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-2 rounded-xl text-xs"
               >
-                रद्द करा (Cancel)
+                रद्द करा
               </button>
               <button 
                 type="button" 
