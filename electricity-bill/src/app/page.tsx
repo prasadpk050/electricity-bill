@@ -22,8 +22,8 @@ interface TariffConfig {
 }
 
 interface BillData {
-  id: string; // Stored as "YYYY-MM" (e.g., "2026-07")
-  month: string; // Displayed as "Jul-2026"
+  id: string; // Formatted with inverted prefix (e.g. "75680_2026-07") for Firestore top-ordering
+  month: string; // Display label (e.g. "Jul-2026")
   rawDocId?: string;
   totalBill: number;
   energyCharge: number;
@@ -67,11 +67,14 @@ const numberToMonthMap: Record<string, string> = {
   '07': 'Jul', '08': 'Aug', '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec'
 };
 
-// Converts any key ("Jul-2026", "Jul-26", "2026-07") to standardized Firestore ID "YYYY-MM"
-const toIsoDocId = (key: string): string => {
+// Extracts pure "YYYY-MM" from any key input ("Jul-2026", "2026-07", "75680_2026-07")
+const extractIsoYm = (key: string): string => {
   if (!key) return '2026-07';
-  const clean = key.trim().replace(/\s+/g, '');
-  if (!clean.includes('-')) return clean;
+  let clean = key.trim().replace(/\s+/g, '');
+  if (clean.includes('_')) {
+    clean = clean.split('_')[1] || clean;
+  }
+  if (!clean.includes('-')) return '2026-07';
 
   const parts = clean.split('-');
   if (parts[0].length === 4 && !isNaN(Number(parts[0]))) {
@@ -85,29 +88,27 @@ const toIsoDocId = (key: string): string => {
   return `${y}-${mNum}`;
 };
 
-// Converts "YYYY-MM" to readable display label "Jul-2026"
-const toDisplayMonth = (isoOrKey: string): string => {
-  if (!isoOrKey) return 'Jul-2026';
-  const clean = isoOrKey.trim().replace(/\s+/g, '');
-  const parts = clean.split('-');
+// Generates an inverted prefix so newest months are lexicographically smaller (appear top in Firebase)
+const toPrefixedDocId = (rawKey: string): string => {
+  const ym = extractIsoYm(rawKey);
+  const [yearStr, monthStr] = ym.split('-');
+  const y = parseInt(yearStr, 10) || 2026;
+  const m = parseInt(monthStr, 10) || 1;
+  const ymVal = y * 12 + m;
+  const invPrefix = 99999 - ymVal;
+  return `${invPrefix}_${ym}`;
+};
 
-  if (parts[0].length === 4 && !isNaN(Number(parts[0]))) {
-    const y = parts[0];
-    const mNum = parts[1].padStart(2, '0');
-    const mName = numberToMonthMap[mNum] || 'Jan';
-    return `${mName}-${y}`;
-  }
-
-  let m = parts[0];
-  let y = parts[1];
-  m = m.charAt(0).toUpperCase() + m.slice(1).toLowerCase();
-  if (m === 'Sept') m = 'Sep';
-  if (y && y.length === 2) y = `20${y}`;
-  return `${m}-${y}`;
+// Converts any key into human-readable "Jul-2026"
+const toDisplayMonth = (key: string): string => {
+  const ym = extractIsoYm(key);
+  const [yearStr, monthStr] = ym.split('-');
+  const mName = numberToMonthMap[monthStr] || 'Jan';
+  return `${mName}-${yearStr}`;
 };
 
 const initialDefaultBill: BillData = {
-  id: '2026-07',
+  id: toPrefixedDocId('2026-07'),
   month: "Jul-2026",
   totalBill: 1400,
   energyCharge: 828,
@@ -144,7 +145,7 @@ const calculateTotalEnergyCharge = (totalUnits: number, config: TariffConfig = d
 export default function BillDashboard() {
   const [isMounted, setIsMounted] = useState(false);
   const [history, setHistory] = useState<BillData[]>([]);
-  const [selectedDocId, setSelectedDocId] = useState<string>('2026-07');
+  const [selectedDocId, setSelectedDocId] = useState<string>('');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isTariffModalOpen, setIsTariffModalOpen] = useState(false);
   const [isAddMonthModalOpen, setIsAddMonthModalOpen] = useState(false);
@@ -218,7 +219,7 @@ export default function BillDashboard() {
     }, 1500);
   };
 
-  // Firestore Sync - Listens & Normalizes into YYYY-MM
+  // Firestore Sync - Maps with Prefixed Keys
   useEffect(() => {
     setIsMounted(true);
     const q = query(collection(db, 'msedcl_bills'));
@@ -240,30 +241,31 @@ export default function BillDashboard() {
         rawDocs.forEach(d => {
           const b = d.data() as BillData;
           const rawId = d.id;
-          const isoKey = toIsoDocId(b.id || rawId || b.month);
-          const displayLabel = toDisplayMonth(b.month || isoKey);
+          const ym = extractIsoYm(b.id || rawId || b.month);
+          const prefixedId = toPrefixedDocId(ym);
+          const displayLabel = toDisplayMonth(b.month || ym);
 
           const cleanBill: BillData = {
             ...b,
-            id: isoKey,
+            id: prefixedId,
             month: displayLabel,
             rawDocId: rawId,
             tariffConfig: b.tariffConfig || defaultTariffConfig
           };
-          uniqueBillsMap.set(isoKey, cleanBill);
+          uniqueBillsMap.set(ym, cleanBill);
         });
 
-        // Sorted automatically by ISO key (YYYY-MM)
-        const sorted = Array.from(uniqueBillsMap.values()).sort((a, b) => b.id.localeCompare(a.id));
+        // Sorted by inverted prefix (A to Z) -> Newest on Top
+        const sorted = Array.from(uniqueBillsMap.values()).sort((a, b) => a.id.localeCompare(b.id));
 
         setHistory(sorted);
 
         setSelectedDocId(prev => {
-          const isoPrev = toIsoDocId(prev);
-          if (isoPrev && sorted.some(b => b.id === isoPrev)) {
-            return isoPrev;
+          if (prev && sorted.some(b => b.id === prev || extractIsoYm(b.id) === extractIsoYm(prev))) {
+            const found = sorted.find(b => b.id === prev || extractIsoYm(b.id) === extractIsoYm(prev));
+            return found ? found.id : sorted[0]?.id || '';
           }
-          return sorted[0]?.id || '2026-07';
+          return sorted[0]?.id || '';
         });
       },
       (error) => {
@@ -279,7 +281,7 @@ export default function BillDashboard() {
 
   // Sorted Array based on user toggle
   const sortedBills = [...history].sort((a, b) => {
-    return sortOrder === 'desc' ? b.id.localeCompare(a.id) : a.id.localeCompare(b.id);
+    return sortOrder === 'desc' ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id);
   });
 
   useEffect(() => {
@@ -310,9 +312,9 @@ export default function BillDashboard() {
     setIsAddMonthModalOpen(true);
   };
 
-  const targetIsoId = toIsoDocId(`${selectedMonth}-${selectedYear}`);
-  const targetDisplayName = toDisplayMonth(targetIsoId);
-  const isMonthDuplicate = history.some(b => b.id === targetIsoId);
+  const targetPrefixedId = toPrefixedDocId(`${selectedMonth}-${selectedYear}`);
+  const targetDisplayName = toDisplayMonth(targetPrefixedId);
+  const isMonthDuplicate = history.some(b => extractIsoYm(b.id) === extractIsoYm(targetPrefixedId));
 
   if (!isMounted || history.length === 0 || !localBill) {
     return (
@@ -425,18 +427,18 @@ export default function BillDashboard() {
   const maxUnits = Math.max(son1Units, son2Units, son3Units, motorUnits, parentsUnits, 1);
   const maxHistoricalUnits = Math.max(...history.map(b => Math.max(0, b.readings.mainCurr - b.readings.mainPrev)), 1);
 
-  // Saves document directly into YYYY-MM document path
+  // Saves using inverted prefix key
   const handleManualSave = async () => {
     if (!localBill) return;
     setIsEditModalOpen(false);
     setIsTariffModalOpen(false);
 
-    const isoDocId = toIsoDocId(localBill.id || localBill.month);
-    const displayLabel = toDisplayMonth(localBill.month || isoDocId);
+    const prefixedId = toPrefixedDocId(localBill.id || localBill.month);
+    const displayLabel = toDisplayMonth(localBill.month || prefixedId);
 
     const billToSave: BillData = {
       ...localBill,
-      id: isoDocId,
+      id: prefixedId,
       month: displayLabel,
       totalBill: actualTotalBill,
       energyCharge: parseFloat(calculatedEnergyCharge.toFixed(2)),
@@ -448,10 +450,10 @@ export default function BillDashboard() {
     };
 
     try {
-      await setDoc(doc(db, 'msedcl_bills', isoDocId), billToSave);
-      lastLoadedIdRef.current = isoDocId;
-      setSelectedDocId(isoDocId);
-      alert('माहिती क्लाउडवर (YYYY-MM फॉर्मॅटमध्ये) सेव्ह झाली आहे!');
+      await setDoc(doc(db, 'msedcl_bills', prefixedId), billToSave);
+      lastLoadedIdRef.current = prefixedId;
+      setSelectedDocId(prefixedId);
+      alert('माहिती क्लाउडवर (Prefix सह) सेव्ह झाली आहे!');
     } catch (error: any) {
       console.error("Save error:", error);
       alert('सेव्ह करताना अडचण आली: ' + error.message);
@@ -462,13 +464,13 @@ export default function BillDashboard() {
     if (!localBill) return;
 
     if (isMonthDuplicate) {
-      alert(`त्रुटी: ${targetDisplayName} (${targetIsoId}) हा महिना आधीच अस्तित्वात आहे!`);
+      alert(`त्रुटी: ${targetDisplayName} हा महिना आधीच अस्तित्वात आहे!`);
       return;
     }
 
     const sourceBill = localBill;
     const newBill: BillData = {
-      id: targetIsoId,
+      id: targetPrefixedId,
       month: targetDisplayName,
       totalBill: 0,
       energyCharge: 0,
@@ -486,10 +488,10 @@ export default function BillDashboard() {
     setIsAddMonthModalOpen(false);
 
     try {
-      await setDoc(doc(db, 'msedcl_bills', targetIsoId), newBill);
-      lastLoadedIdRef.current = targetIsoId;
+      await setDoc(doc(db, 'msedcl_bills', targetPrefixedId), newBill);
+      lastLoadedIdRef.current = targetPrefixedId;
       setLocalBill(JSON.parse(JSON.stringify(newBill)));
-      setSelectedDocId(targetIsoId);
+      setSelectedDocId(targetPrefixedId);
     } catch (error: any) {
       alert('महिना जोडताना अडचण आली: ' + error.message);
     }
@@ -500,8 +502,7 @@ export default function BillDashboard() {
     const targetId = deleteCandidateId;
     setDeleteCandidateId(null);
 
-    const isoKey = toIsoDocId(targetId);
-    const displayLabel = toDisplayMonth(targetId);
+    const targetYm = extractIsoYm(targetId);
 
     try {
       const snap = await getDocs(collection(db, 'msedcl_bills'));
@@ -509,15 +510,15 @@ export default function BillDashboard() {
       
       snap.forEach(d => {
         const rawId = d.id;
-        const dIso = toIsoDocId(rawId);
-        if (dIso === isoKey || rawId === targetId || rawId === displayLabel) {
+        const dYm = extractIsoYm(rawId);
+        if (dYm === targetYm || rawId === targetId) {
           deletes.push(deleteDoc(doc(db, 'msedcl_bills', rawId)));
         }
       });
 
       await Promise.all(deletes);
 
-      const nextRemaining = sortedBills.filter(b => b.id !== isoKey);
+      const nextRemaining = sortedBills.filter(b => extractIsoYm(b.id) !== targetYm);
       if (nextRemaining.length > 0) {
         lastLoadedIdRef.current = nextRemaining[0].id;
         setSelectedDocId(nextRemaining[0].id);
@@ -572,9 +573,9 @@ export default function BillDashboard() {
           if (!v[0] && !v[1]) continue;
           
           const rawId = v[0] || v[1];
-          const isoDocKey = toIsoDocId(rawId);
+          const prefixedDocKey = toPrefixedDocId(rawId);
           const displayLabel = toDisplayMonth(v[1] || rawId);
-          if (!topDocId) topDocId = isoDocKey;
+          if (!topDocId) topDocId = prefixedDocKey;
 
           const hasTariff = v.length >= 26;
 
@@ -608,7 +609,7 @@ export default function BillDashboard() {
           const msedclRoundedTotal = Math.floor(rawTotal / 10) * 10;
 
           const importedBill: BillData = {
-            id: isoDocKey,
+            id: prefixedDocKey,
             month: displayLabel,
             totalBill: msedclRoundedTotal,
             energyCharge: parseFloat(eCharge.toFixed(2)),
@@ -623,14 +624,14 @@ export default function BillDashboard() {
             }
           };
 
-          await setDoc(doc(db, 'msedcl_bills', isoDocKey), importedBill);
+          await setDoc(doc(db, 'msedcl_bills', prefixedDocKey), importedBill);
         }
 
         if (topDocId) {
           setSelectedDocId(topDocId);
         }
       } catch (err: any) {
-        alert('CSV फाइल लोड करताना त्रुटी आली: ' + err.message);
+        alert('CSV लोड करताना त्रुटी आली: ' + err.message);
       }
     };
     reader.readAsText(file);
@@ -900,11 +901,11 @@ export default function BillDashboard() {
               <p className="font-bold text-slate-200 text-xs">{son1Name}</p>
               <div>
                 <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                <input type="number" value={localBill.readings.son1Prev} onChange={(e) => updateActiveField(['readings', 'son1Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                <input type="number" value={localBill.readings.son1Curr} onChange={(e) => updateActiveField(['readings', 'son1Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
               </div>
             </div>
 
@@ -912,11 +913,11 @@ export default function BillDashboard() {
               <p className="font-bold text-slate-200 text-xs">{son2Name}</p>
               <div>
                 <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                <input type="number" value={localBill.readings.son2Prev} onChange={(e) => updateActiveField(['readings', 'son2Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                <input type="number" value={localBill.readings.son2Curr} onChange={(e) => updateActiveField(['readings', 'son2Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
               </div>
             </div>
 
@@ -924,11 +925,11 @@ export default function BillDashboard() {
               <p className="font-bold text-slate-200 text-xs">{son3Name}</p>
               <div>
                 <label className="text-slate-400 block text-[11px]">मागणी (Prev)</label>
-                <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                <input type="number" value={localBill.readings.son3Prev} onChange={(e) => updateActiveField(['readings', 'son3Prev'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
               </div>
               <div>
                 <label className="text-slate-400 block text-[11px]">चालू (Curr)</label>
-                <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
+                <input type="number" value={localBill.readings.son3Curr} onChange={(e) => updateActiveField(['readings', 'son3Curr'], parseFloat(e.target.value) || 0)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-slate-200 font-bold outline-none" />
               </div>
             </div>
           </div>
@@ -1165,7 +1166,7 @@ export default function BillDashboard() {
               <Upload className="w-5 h-5" /> CSV डेटा इम्पोर्ट पर्याय निवडा
             </h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              तुम्हाला जुना सर्व डेटा पुसून (Clear Old Cloud Data) फक्त या नवीन CSV मधील महिने <strong className="text-amber-400">YYYY-MM</strong> स्वरूपात ठेवायचे आहेत का?
+              तुम्हाला जुना सर्व डेटा पुसून (Clear Old Cloud Data) फक्त या नवीन CSV मधील महिने <strong className="text-amber-400">Inverted Prefix</strong> स्वरूपात (Latest Month on Top) ठेवायचे आहेत का?
             </p>
             <div className="flex flex-col gap-2 pt-2">
               <button
@@ -1210,7 +1211,7 @@ export default function BillDashboard() {
               <Trash2 className="w-5 h-5" /> महिना कायमचा हटवायचा का?
             </h3>
             <p className="text-xs text-slate-300">
-              तुम्हाला खात्री आहे का की <strong className="text-amber-400">"{toDisplayMonth(deleteCandidateId)} ({toIsoDocId(deleteCandidateId)})"</strong> नोंद कायमची हटवायची आहे?
+              तुम्हाला खात्री आहे का की <strong className="text-amber-400">"{toDisplayMonth(deleteCandidateId)}"</strong> नोंद कायमची हटवायची आहे?
             </p>
             <div className="pt-2 flex justify-end gap-2">
               <button 
@@ -1320,11 +1321,11 @@ export default function BillDashboard() {
               {isMonthDuplicate ? (
                 <div className="p-2.5 bg-rose-500/10 border border-rose-500/40 rounded-xl text-[11px] text-rose-400 flex items-center gap-1.5 font-semibold">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>{targetDisplayName} ({targetIsoId}) हा महिना आधीच अस्तित्वात आहे!</span>
+                  <span>{targetDisplayName} हा महिना आधीच अस्तित्वात आहे!</span>
                 </div>
               ) : (
                 <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400">
-                  नवा महिना: <span className="text-amber-400 font-bold">{targetDisplayName}</span> ({targetIsoId})
+                  नवा महिना: <span className="text-amber-400 font-bold">{targetDisplayName}</span>
                 </div>
               )}
             </div>
